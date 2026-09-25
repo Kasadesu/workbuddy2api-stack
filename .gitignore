@@ -1,0 +1,27 @@
+# ---------- 含密钥，永不入库 ----------
+admin-credentials.txt
+credentials.txt
+workbuddy2api-config.json
+wb2api-接入信息.md
+keys.json
+basicauth.hash
+realkey.txt
+
+# ---------- 本地临时 / 一次性脚本 ----------
+candidate.txt
+check_key.py
+_check.js
+_page_check.js
+admin_page*.png
+admin-page-screenshot.png
+*.bak
+*.bak.*
+*.tmp
+*.log
+__pycache__/
+
+# ---------- 第三方审计样本（他人仓库代码，仅本地参考，不入库）----------
+codex-bridge-audit/
+
+# ---------- WorkBuddy 会话数据 ----------
+.workbuddy/

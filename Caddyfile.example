@@ -1,0 +1,45 @@
+# Replace api.example.com, API keys, and the bcrypt hash before installing.
+api.example.com {
+	encode gzip
+
+	# The browser-facing admin page uses its own login form. Only the JSON API
+	# below is protected by Caddy Basic Auth for a second layer of protection.
+	handle /admin/api/* {
+		uri strip_prefix /admin
+		basicauth {
+			admin $2a$14$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+		}
+		reverse_proxy 127.0.0.1:7864
+	}
+	handle /admin* {
+		uri strip_prefix /admin
+		reverse_proxy 127.0.0.1:7864
+	}
+
+	# The route utility manages this block. It translates Responses requests
+	# to the local bridge and keeps the upstream key off the public interface.
+	# >>> responses-bridge (managed) >>>
+	handle /v1/responses* {
+		@bridge_bad {
+			not header_regexp authcheck Authorization "^Bearer (__PUBLIC_KEY_1__|__PUBLIC_KEY_2__)$"
+		}
+		respond @bridge_bad "invalid API key" 401
+		reverse_proxy 127.0.0.1:7866 {
+			header_up Authorization "Bearer __GATEWAY_INTERNAL_KEY__"
+			flush_interval -1
+		}
+	}
+	# <<< responses-bridge (managed) <<<
+
+	handle {
+		@bad {
+			not header_regexp authcheck Authorization "^Bearer (__PUBLIC_KEY_1__|__PUBLIC_KEY_2__)$"
+			not path /healthz
+		}
+		respond @bad "invalid API key" 401
+		reverse_proxy 127.0.0.1:7863 {
+			header_up Authorization "Bearer __GATEWAY_INTERNAL_KEY__"
+			flush_interval -1
+		}
+	}
+}

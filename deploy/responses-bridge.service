@@ -1,0 +1,21 @@
+[Unit]
+Description=Responses-to-Chat API bridge
+Documentation=https://github.com/example/workbuddy2api-stack
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=workbuddy
+WorkingDirectory=/opt/responses-bridge
+# 商用搜索 API 的 key 放这里，格式 KEY=value 每行一个；文件不存在也能正常启动（前导 -）
+EnvironmentFile=-/opt/responses-bridge/search.env
+ExecStart=/usr/bin/python3 /opt/responses-bridge/responses-bridge.py --host 127.0.0.1 --port 7866 --upstream http://127.0.0.1:7863/v1/chat/completions --logdir /var/log/responses-bridge
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=responses-bridge
+
+[Install]
+WantedBy=multi-user.target
