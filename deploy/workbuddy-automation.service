@@ -1,0 +1,18 @@
+[Unit]
+Description=WorkBuddy growth task sidecar scheduler
+After=network-online.target docker.service wb2api-admin.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=workbuddy
+WorkingDirectory=/opt/workbuddy2api/admin
+ExecStart=/usr/bin/python3 /opt/workbuddy2api/admin/workbuddy_automation.py --daemon
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=workbuddy-automation
+
+[Install]
+WantedBy=multi-user.target
