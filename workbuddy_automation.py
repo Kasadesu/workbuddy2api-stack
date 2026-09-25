@@ -5,6 +5,10 @@
 The gateway container remains the source of truth for credentials and its
 native check-in scheduler. This module only invokes the existing container
 tools through ``docker exec`` and keeps task automation opt-in.
+
+Reference note: task concepts and scheduling flows were informed by
+linguo2625469/workbuddy2api-panel. This file is an independent implementation;
+see docs/ATTRIBUTIONS.md for the full attribution boundary.
 """
 import argparse
 import contextlib
