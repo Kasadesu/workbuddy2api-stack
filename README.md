@@ -35,12 +35,16 @@ The deployment helpers intentionally refuse to run unless `DEPLOY_HOST` and `DEP
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for a full example and [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for environment variables.
 
+## References and attribution
+
+The upstream 2API gateway is [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api). The check-in, travel, and growth-task automation concepts were referenced from [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel). The exact scope, attribution, and distinction between reference material and independent code are documented in [docs/ATTRIBUTIONS.md](docs/ATTRIBUTIONS.md).
+
 ## Security model
 
 Keep the upstream key, account OAuth files, admin password, Caddy bcrypt hash, and search-provider keys outside Git. Public API keys should be generated with the `sk-` prefix by the admin page and rotated when access changes. Bind the bridge and admin services to loopback; let Caddy handle TLS and public routing.
 
 The automation sidecar is disabled for task execution by default. Review the task list and permissions before enabling it.
 
-## License and upstream attribution
+## License
 
-The integration code in this repository is released under the MIT License. The upstream WorkBuddy-compatible gateway is a separate project with its own license and terms; this repository does not relicense or redistribute that upstream code.
+The integration code in this repository is released under the MIT License. See [NOTICE.md](NOTICE.md) and [docs/ATTRIBUTIONS.md](docs/ATTRIBUTIONS.md) for upstream references and licensing boundaries.
