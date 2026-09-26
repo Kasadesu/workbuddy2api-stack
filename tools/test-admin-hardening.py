@@ -345,6 +345,9 @@ def test_page_formats_tokens_as_m(m):
           "管理页包含 Token 的 M 格式化逻辑")
     check("usageTokenValue(input)" in m.PAGE and "usageTokenValue(totalTokens)" in m.PAGE,
           "积分使用记录的 Token 列使用 M 格式")
+    check("缓存输入 Token" in m.PAGE and "usagePercentValue(cacheHitRate)" in m.PAGE and
+          "value===null||value===undefined" in m.PAGE,
+          "最近请求表展示缓存输入和命中率")
 
 
 def test_recent_usage_info(m):
@@ -353,19 +356,30 @@ def test_recent_usage_info(m):
         "records": [
             {"at": "2026-09-22T10:00:00+08:00", "uid": "new", "nickname": "New",
              "realm": "cn", "model": "cn:new", "mode": "stream", "status": 200,
-             "input_tokens": 20, "output_tokens": 3, "total_tokens": 23, "credits": 0.2},
+             "input_tokens": 20, "cached_input_tokens": 8, "output_tokens": 3,
+             "total_tokens": 23, "credits": 0.2},
             {"at": "2026-09-21T10:00:00+08:00", "uid": "old", "nickname": "Old",
              "realm": "cn", "model": "cn:old", "mode": "sync", "status": 500,
              "credits": 0.1, "request_body": "must-not-be-saved"},
+            {"at": "2026-09-20T10:00:00+08:00", "uid": "zero", "nickname": "Zero",
+             "model": "cn:zero", "input_tokens": 12, "cached_input_tokens": 0},
+            {"at": "2026-09-19T10:00:00+08:00", "uid": "unknown", "nickname": "Unknown",
+             "model": "cn:unknown", "input_tokens": 12},
         ],
     }
     got = m.recent_usage_info()
     rows = got.get("records") or []
     check(got.get("ok") and got.get("mode") == "request" and got.get("enabled") and
-          [row["uid"] for row in rows] == ["new", "old"],
+          [row["uid"] for row in rows] == ["new", "old", "zero", "unknown"],
           "最近使用记录保留网关返回顺序", str(got))
-    check(rows[0]["total_tokens"] == 23 and rows[0]["credits"] == 0.2,
-          "最近使用记录兼容 Token 和积分字段", str(rows))
+    check(rows[0]["total_tokens"] == 23 and rows[0]["credits"] == 0.2 and
+          rows[0]["cached_input_tokens"] == 8 and rows[0]["cache_hit_rate"] == 0.4,
+          "最近使用记录计算缓存输入和命中率", str(rows))
+    check(rows[2]["cached_input_tokens"] == 0 and rows[2]["cache_hit_rate"] == 0,
+          "显式零缓存显示为 0% 命中", str(rows[2]))
+    check(rows[1]["cached_input_tokens"] is None and rows[1]["cache_hit_rate"] is None and
+          rows[3]["cached_input_tokens"] is None and rows[3]["cache_hit_rate"] is None,
+          "缺缓存字段与失败请求显示未知而非 0%", str(rows))
     check("request_body" not in json.dumps(rows, ensure_ascii=False),
           "最近使用记录不向管理页透传请求正文", str(rows))
 
