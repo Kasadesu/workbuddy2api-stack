@@ -57,7 +57,7 @@ USAGE_HISTORY_LIMIT = 240
 
 # 页面版本标记：服务端把此值嵌进 HTML，前端定时与 /api/version 比对，
 # 不一致说明后端代码已更新 → 自动重载页面，用户无需手动强刷。
-PAGE_VERSION = "v1.0.0"
+PAGE_VERSION = "v1.0.1"
 RECENT_USAGE_LIMIT = 20
 
 # 模型目录包含积分倍率，但上游接口较慢且倍率不是每秒变化；总览按需读取，
@@ -428,6 +428,19 @@ def recent_usage_info(limit=RECENT_USAGE_LIMIT):
         output_tokens = _usage_int(raw.get("output_tokens"))
         if output_tokens is None:
             output_tokens = _usage_int(raw.get("completion_tokens"))
+        if input_tokens is not None and input_tokens < 0:
+            input_tokens = None
+        cached_input_tokens = _usage_int(raw.get(
+            "cached_input_tokens", raw.get("cache_hit_tokens", raw.get("cached_tokens"))))
+        if cached_input_tokens is not None and cached_input_tokens < 0:
+            cached_input_tokens = None
+        cache_hit_rate = None
+        if cached_input_tokens is not None and input_tokens is not None:
+            if cached_input_tokens <= input_tokens:
+                if input_tokens > 0:
+                    cache_hit_rate = cached_input_tokens / input_tokens
+            else:
+                cached_input_tokens = None
         total_tokens = _usage_int(raw.get("total_tokens"))
         if total_tokens is None and input_tokens is not None and output_tokens is not None:
             total_tokens = input_tokens + output_tokens
@@ -440,6 +453,8 @@ def recent_usage_info(limit=RECENT_USAGE_LIMIT):
             "mode": str(raw.get("mode") or ""),
             "status": _usage_int(raw.get("status")),
             "input_tokens": input_tokens,
+            "cached_input_tokens": cached_input_tokens,
+            "cache_hit_rate": cache_hit_rate,
             "output_tokens": output_tokens,
             "total_tokens": total_tokens,
             "credits": raw.get("credits", raw.get("credit")),
@@ -1154,7 +1169,7 @@ label.sw{float:right;color:var(--mut);font-weight:400;font-size:12px;display:inl
 .model-table .credit{font-weight:600;color:var(--tx);white-space:nowrap}
 .usage-table{min-width:620px}
 .usage-table.account-usage{min-width:980px}
-.usage-table.recent-usage{min-width:1080px}
+.usage-table.recent-usage{min-width:1320px}
 .usage-table .account small{display:block;color:var(--mut);font-size:11px;margin-top:2px}
 .usage-table .delta{font-weight:600;color:var(--ok);white-space:nowrap}
 .usage-table .delta.neutral{color:var(--mut);font-weight:400}
@@ -1508,6 +1523,11 @@ function formatTokenCount(value){
 function usageTokenValue(value){
   return value===null||value===undefined||value===''?'--':esc(formatTokenCount(value));
 }
+function usagePercentValue(value){
+  if(value===null||value===undefined||value==='') return '--';
+  const n=Number(value);
+  return Number.isFinite(n)&&n>=0&&n<=1?(n*100).toFixed(1)+'%':'--';
+}
 async function refresh(){
   try{
   const d=await api('/api/state');
@@ -1668,6 +1688,8 @@ function renderRecentRequestRecords(records,available){
     const statusText=status===null||status===undefined||status===''?'--':
       (Number(status)===200?'成功':('失败 '+String(status)));
     const input=usageMetric(record,['input_tokens','prompt_tokens','inputToken']);
+    const cachedInput=usageMetric(record,['cached_input_tokens','cache_hit_tokens','cached_tokens']);
+    const cacheHitRate=usageMetric(record,['cache_hit_rate']);
     const output=usageMetric(record,['output_tokens','completion_tokens','outputToken']);
     const totalTokens=usageMetric(record,['total_tokens','totalTokens']);
     const credits=usageMetric(record,['credits','credit','cost']);
@@ -1675,10 +1697,11 @@ function renderRecentRequestRecords(records,available){
       (uid&&String(uid)!==String(account)?'<small class="mono">'+usageValue(uid)+'</small>':'')+
       '</td><td>'+usageValue(realm)+'</td><td class="mono">'+usageValue(model)+
       '</td><td>'+usageValue(mode)+'</td><td>'+usageValue(statusText)+
-      '</td><td>'+usageTokenValue(input)+'</td><td>'+usageTokenValue(output)+
+      '</td><td>'+usageTokenValue(input)+'</td><td>'+usageTokenValue(cachedInput)+
+      '</td><td>'+usagePercentValue(cacheHitRate)+'</td><td>'+usageTokenValue(output)+
       '</td><td>'+usageTokenValue(totalTokens)+'</td><td class="credit">'+usageValue(credits)+'</td></tr>';
   }).join('');
-  box.innerHTML='<div class="table-scroll"><table class="usage-table recent-usage"><tr><th>时间</th><th>账号</th><th>域</th><th>模型</th><th>模式</th><th>状态</th><th>输入 Token</th><th>输出 Token</th><th>总 Token</th><th>积分</th></tr>'+rows+'</table></div>';
+  box.innerHTML='<div class="table-scroll"><table class="usage-table recent-usage"><tr><th>时间</th><th>账号</th><th>域</th><th>模型</th><th>模式</th><th>状态</th><th>输入 Token</th><th>缓存输入 Token</th><th>命中率</th><th>输出 Token</th><th>总 Token</th><th>积分</th></tr>'+rows+'</table></div>';
 }
 function renderUsage(d){
   const summary=$('#usageSummary'), recentBox=$('#recentUsageBox'), box=$('#usageBox');
