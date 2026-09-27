@@ -899,6 +899,11 @@ def render_api_block(keys, real_key, basicauth_user, basicauth_hash, bridge_bloc
         "\t\turi strip_prefix /admin\n"
         "\t\treverse_proxy 127.0.0.1:7864\n"
         "\t}\n"
+        "\thandle_path /openrouter/* {\n"
+        "\t\treverse_proxy https://openrouter.ai {\n"
+        "\t\t\tflush_interval -1\n"
+        "\t\t}\n"
+        "\t}\n"
         + (bridge_block + "\n" if bridge_block else "") +
         "\thandle {\n"
         "\t\t@bad {\n"
