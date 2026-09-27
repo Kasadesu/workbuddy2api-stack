@@ -35,6 +35,10 @@ The deployment helpers intentionally refuse to run unless `DEPLOY_HOST` and `DEP
 
 The admin usage view shows cached input tokens and cache hit rates when the upstream gateway includes cache counters in recent-request records. Missing counters display as `--`. Upstream gateway source is not included in this repository.
 
+## Optional OpenRouter route
+
+The Caddy example and admin-generated site configuration expose `/openrouter/*` as a direct passthrough to OpenRouter. Configure compatible clients with `https://<PUBLIC_HOST>/openrouter/api/v1` and the caller's own OpenRouter API key. These requests bypass the WorkBuddy gateway and its account/usage pool; this proxy does not enforce model pricing or free-model selection.
+
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for a full example and [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for environment variables.
 
 ## References and attribution

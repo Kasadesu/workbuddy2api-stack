@@ -200,6 +200,12 @@ def test_render_admin_auth_only_protects_api(m):
     check("basicauth" in api_block, "Basic Auth 只保护管理 API")
     check("basicauth" not in page_block, "管理页本身不再触发浏览器认证框")
     check(bridge in rendered, "更新 Caddy 时保留 Responses 桥接路由")
+    check("handle_path /openrouter/* {" in rendered and
+          "reverse_proxy https://openrouter.ai" in rendered,
+          "管理页重建 Caddy 配置时保留 OpenRouter 反代")
+    openrouter = rendered.split("\thandle_path /openrouter/* {", 1)[1].split("\n\t}\n", 1)[0]
+    check("header_up Authorization" not in openrouter,
+          "OpenRouter 反代不覆盖调用方自己的 Authorization")
     check("wb\\-legacy" in rendered and "sk\\-new" in rendered,
           "Caddy 白名单同时兼容旧、新 Key")
 
