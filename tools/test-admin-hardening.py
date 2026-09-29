@@ -356,6 +356,24 @@ def test_page_formats_tokens_as_m(m):
           "最近请求表展示缓存输入和命中率")
 
 
+def test_platform_directory(m):
+    original = m.list_accounts
+    m.list_accounts = lambda: [{"uid": "account-a"}]
+    try:
+        got = m.platform_info()
+    finally:
+        m.list_accounts = original
+    rows = got.get("platforms") or []
+    ids = {row.get("id") for row in rows}
+    raw = json.dumps(got, ensure_ascii=False)
+    check(got.get("brand") == "Kasa2API" and ids == {"workbuddy", "openrouter", "responses"},
+          "平台目录包含 Kasa2API 三类入口", str(got))
+    check("/openrouter/api/v1" in raw and "自己的 OpenRouter API Key" in raw,
+          "平台目录说明 OpenRouter 的独立入口和认证边界")
+    check("access_token" not in raw and "api_key" not in raw,
+          "平台目录不返回账号令牌或网关密钥")
+
+
 def test_recent_usage_info(m):
     m._gateway_recent_usage = lambda limit=20: {
         "enabled": True,
@@ -412,6 +430,7 @@ def main():
         test_token_stats_reading(m)
         test_gateway_token_stats_accumulate_and_fallback(m)
         test_page_formats_tokens_as_m(m)
+        test_platform_directory(m)
         test_recent_usage_info(m)
     if FAILS:
         print("\n%d failures: %s" % (len(FAILS), FAILS))

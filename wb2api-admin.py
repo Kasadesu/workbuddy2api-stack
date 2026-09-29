@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-workbuddy2api 管理面板（最小实现）
+ Kasa2API 管理面板（WorkBuddy 兼容网关管理）
 - 只监听 127.0.0.1，公网页面由 Caddy 反代 + TLS 把关，API 继续使用 Basic Auth
 - 对 auths/ 的所有读写都以容器 uid 10001 身份 docker exec 执行
   （宿主机 admin 对该目录无写权限，且属主非 10001 会导致账号数为 0）
@@ -43,6 +43,7 @@ GATEWAY_TOKEN_STATS_FILE = os.path.join(ADMIN_DIR, "gateway-token-usage.json")
 CADDY_FILE = os.environ.get("CADDY_FILE", "/etc/caddy/Caddyfile")
 PUBLIC_HOST = os.environ.get("PUBLIC_HOST", "api.example.com")
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://api.example.com/v1")
+OPENROUTER_BASE_URL = "https://%s/openrouter/api/v1" % PUBLIC_HOST
 AUTOMATION = AutomationManager(BASE, CONTAINER)
 
 # 管理页所有会改动 keys.json + Caddyfile 的操作必须串行执行。
@@ -57,7 +58,7 @@ USAGE_HISTORY_LIMIT = 240
 
 # 页面版本标记：服务端把此值嵌进 HTML，前端定时与 /api/version 比对，
 # 不一致说明后端代码已更新 → 自动重载页面，用户无需手动强刷。
-PAGE_VERSION = "v1.0.1"
+PAGE_VERSION = "v1.0.2"
 RECENT_USAGE_LIMIT = 20
 
 # 模型目录包含积分倍率，但上游接口较慢且倍率不是每秒变化；总览按需读取，
@@ -536,6 +537,53 @@ def list_accounts():
                 pass
         accounts.append(info)
     return accounts
+
+
+def platform_info():
+    """返回 Kasa2API 的平台目录，不包含任何密钥、令牌或账号凭据。"""
+    try:
+        account_count = len(list_accounts())
+    except Exception:
+        account_count = None
+    return {
+        "ok": True,
+        "brand": "Kasa2API",
+        "platforms": [
+            {
+                "id": "workbuddy",
+                "name": "WorkBuddy / CodeBuddy",
+                "type": "账号池网关",
+                "status": "active",
+                "base_url": PUBLIC_BASE_URL,
+                "auth": "使用 Kasa2API API Key",
+                "usage": "WorkBuddy / CodeBuddy 共享积分和网关用量",
+                "account_count": account_count,
+                "features": ["Chat Completions", "Responses 桥接", "签到和猫猫旅行"],
+            },
+            {
+                "id": "openrouter",
+                "name": "OpenRouter",
+                "type": "直通反代",
+                "status": "passthrough",
+                "base_url": OPENROUTER_BASE_URL,
+                "auth": "使用调用方自己的 OpenRouter API Key",
+                "usage": "由 OpenRouter 账号计费，不进入 WorkBuddy 积分统计",
+                "account_count": None,
+                "features": ["OpenAI 兼容模型目录", "模型请求直通"],
+            },
+            {
+                "id": "responses",
+                "name": "Responses Bridge",
+                "type": "协议桥接",
+                "status": "active",
+                "base_url": PUBLIC_BASE_URL + "/responses",
+                "auth": "使用 Kasa2API API Key",
+                "usage": "请求转发到 WorkBuddy 网关并沿用其账号池",
+                "account_count": account_count,
+                "features": ["/v1/responses", "流式事件转换", "图片输入"],
+            },
+        ],
+    }
 
 
 def normalize_model_credits(value):
@@ -1093,7 +1141,7 @@ def mutate_keys(mutator):
 PAGE = """<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>workbuddy2api 管理</title>
+<title>Kasa2API 管理</title>
 <style>
 :root{--bg:#f6f7f9;--card:#fff;--bd:#e3e6ea;--tx:#1f2328;--mut:#6b7280;--pri:#2563eb;--ok:#16a34a;--bad:#dc2626}
 *{box-sizing:border-box}
@@ -1178,11 +1226,22 @@ label.sw{float:right;color:var(--mut);font-weight:400;font-size:12px;display:inl
 .usage-table .account small{display:block;color:var(--mut);font-size:11px;margin-top:2px}
 .usage-table .delta{font-weight:600;color:var(--ok);white-space:nowrap}
 .usage-table .delta.neutral{color:var(--mut);font-weight:400}
+.platform-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
+.platform-card{border:1px solid var(--bd);border-radius:8px;padding:14px;background:#fafbfc}
+.platform-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+.platform-head strong{font-size:15px}
+.platform-badge{font-size:11px;color:#166534;background:#eefbf2;border:1px solid #b7e4c7;border-radius:999px;padding:2px 7px;white-space:nowrap}
+.platform-badge.passthrough{color:#92400e;background:#fffbeb;border-color:#fcd34d}
+.platform-card dl{margin:0;font-size:12px}
+.platform-card dt{color:var(--mut);margin-top:8px}
+.platform-card dd{margin:1px 0 0;word-break:break-word}
+.platform-card a{color:var(--pri)}
+.platform-features{margin:10px 0 0;padding-left:18px;color:var(--mut);font-size:12px}
 </style></head><body>
 <div id="loginView" class="login-page">
   <form id="loginForm" class="login-card">
-    <h1>workbuddy2api</h1>
-    <p class="sub">管理页登录</p>
+    <h1>Kasa2API</h1>
+    <p class="sub">统一 API 网关管理</p>
     <label class="login-field">用户名<input id="loginUser" autocomplete="username" required></label>
     <label class="login-field">密码<input id="loginPass" type="password" autocomplete="current-password" required></label>
     <button id="btnLogin" type="submit">登录</button>
@@ -1192,11 +1251,12 @@ label.sw{float:right;color:var(--mut);font-weight:400;font-size:12px;display:inl
 <div id="appView" hidden>
 <div id="banner"></div>
 <div class="wrap">
-<h1>workbuddy2api 管理 <button id="btnLogout" class="ghost" style="float:right;margin-top:-4px">退出登录</button></h1>
-<p class="sub">__PUBLIC_HOST__ · 账号池与 OAuth 登录管理 · <span style="color:var(--mut)">页面版本 __PAGE_VER__</span></p>
+<h1>Kasa2API 管理 <button id="btnLogout" class="ghost" style="float:right;margin-top:-4px">退出登录</button></h1>
+<p class="sub">__PUBLIC_HOST__ · 多平台 API 网关 · <span style="color:var(--mut)">页面版本 __PAGE_VER__</span></p>
 
 <nav class="module-nav" aria-label="管理模块">
   <a href="#/overview" data-module-link="overview">总览</a>
+  <a href="#/platforms" data-module-link="platforms">平台</a>
   <a href="#/accounts" data-module-link="accounts">账号与积分</a>
   <a href="#/usage" data-module-link="usage">积分使用记录</a>
   <a href="#/gateway" data-module-link="gateway">网关与 Key</a>
@@ -1212,6 +1272,13 @@ label.sw{float:right;color:var(--mut);font-weight:400;font-size:12px;display:inl
 </div>
 <div class="card"><h2>模型积分倍率<button id="btnModels" class="ghost fr">刷新</button></h2>
   <div id="modelBox"><p class="sub">加载中…</p></div>
+</div>
+</section>
+
+<section class="module" id="module-platforms" data-module="platforms">
+<div class="card"><h2>平台入口</h2>
+  <p class="sub">统一查看各平台入口；账号、密钥和计费边界仍按平台分别管理。</p>
+  <div id="platformBox"><p class="sub">加载中…</p></div>
 </div>
 </section>
 
@@ -1322,7 +1389,7 @@ let reloading=false;  // 已触发自动重载
 let lastCredit=0;     // 上次查积分的时间戳
 let lastModels=0;     // 上次查模型倍率的时间戳
 let lastUsage=0;      // 上次查积分使用记录的时间戳
-const MODULES=['overview','accounts','usage','gateway','automation','security'];
+const MODULES=['overview','platforms','accounts','usage','gateway','automation','security'];
 let currentModule='overview';
 let authHeader='';
 let appStarted=false;
@@ -1351,9 +1418,9 @@ function decodeBasicAuth(header){
     return split<0?null:[value.slice(0,split),value.slice(split+1)];
   }catch(e){ return null; }
 }
-function storedAuth(){ try{return sessionStorage.getItem('wb2api_auth')||'';}catch(e){return '';} }
-function persistAuth(){ try{sessionStorage.setItem('wb2api_auth',authHeader);}catch(e){} }
-function clearAuth(){ authHeader=''; try{sessionStorage.removeItem('wb2api_auth');}catch(e){} }
+function storedAuth(){ try{return sessionStorage.getItem('kasa2api_auth')||sessionStorage.getItem('wb2api_auth')||'';}catch(e){return '';} }
+function persistAuth(){ try{sessionStorage.setItem('kasa2api_auth',authHeader);sessionStorage.removeItem('wb2api_auth');}catch(e){} }
+function clearAuth(){ authHeader=''; try{sessionStorage.removeItem('kasa2api_auth');sessionStorage.removeItem('wb2api_auth');}catch(e){} }
 function loginMessage(txt,ok){
   const m=$('#loginMsg'); m.className='msg '+(ok?'ok':'err'); m.textContent=txt; m.style.display='block';
 }
@@ -1480,6 +1547,7 @@ function activateModule(name){
   if(location.hash!=='#/'+name) history.replaceState(null,'','#/'+name);
   if(name==='accounts') loadCredit(true);
   if(name==='overview'){ loadModels(true); }
+  if(name==='platforms') loadPlatforms(true);
   if(name==='usage') loadUsage(true);
   if(name==='gateway') loadKeys(true);
   if(name==='automation') loadAutomation(true);
@@ -1587,6 +1655,31 @@ async function loadModels(silent,force){
   }catch(e){
     if(!silent&&box) box.innerHTML='<div class="msg err" style="display:block">请求失败：'+esc(e.message)+'</div>';
   }
+}
+function renderPlatforms(d){
+  const box=$('#platformBox'); if(!box) return;
+  const platforms=Array.isArray(d.platforms)?d.platforms:[];
+  if(!platforms.length){ box.innerHTML='<p class="sub">暂未读取到平台信息。</p>'; return; }
+  const statusText={active:'已接入',passthrough:'透传'};
+  box.innerHTML='<div class="platform-grid">'+platforms.map(p=>{
+    const badge=statusText[p.status]||'已配置';
+    const badgeClass=p.status==='passthrough'?' passthrough':'';
+    const url=p.base_url?'<a href="'+esc(p.base_url)+'" target="_blank" rel="noopener">'+esc(p.base_url)+'</a>':'--';
+    const count=p.account_count===null||p.account_count===undefined?'不适用':String(p.account_count);
+    const features=Array.isArray(p.features)?p.features.map(x=>'<li>'+esc(x)+'</li>').join(''):'';
+    return '<article class="platform-card"><div class="platform-head"><strong>'+esc(p.name||p.id)+'</strong><span class="platform-badge'+badgeClass+'">'+badge+'</span></div>'+
+      '<dl><dt>类型</dt><dd>'+esc(p.type||'--')+'</dd><dt>入口</dt><dd>'+url+'</dd><dt>认证</dt><dd>'+esc(p.auth||'--')+'</dd><dt>用量归属</dt><dd>'+esc(p.usage||'--')+'</dd><dt>账号数</dt><dd>'+esc(count)+'</dd></dl>'+
+      (features?'<ul class="platform-features">'+features+'</ul>':'')+'</article>';
+  }).join('')+'</div>';
+}
+async function loadPlatforms(silent){
+  const box=$('#platformBox');
+  if(!silent&&box) box.innerHTML='<p class="sub">正在读取平台信息…</p>';
+  try{
+    const r=await api('/api/platforms');
+    if(!r.ok){ if(!silent&&box) box.innerHTML='<div class="msg err" style="display:block">读取失败：'+esc(r.error||'未知错误')+'</div>'; return; }
+    renderPlatforms(r);
+  }catch(e){ if(!silent&&box) box.innerHTML='<div class="msg err" style="display:block">请求失败：'+esc(e.message)+'</div>'; }
 }
 async function loadAdminAuth(){
   try{ const a=await api('/api/admin-auth'); if(a.ok&&a.username) $('#adminUser').value=a.username; }
@@ -2089,6 +2182,7 @@ async function tick(){
   if(typeof document.hidden!=='undefined'&&document.hidden) return;  // 后台标签页不刷，省资源
   await refresh(); stamp();
   if(currentModule==='overview'&&Date.now()-lastModels>300000) loadModels(true);
+  if(currentModule==='platforms') loadPlatforms(true);
   if(currentModule==='accounts'&&Date.now()-lastCredit>120000){ lastCredit=Date.now(); loadCredit(true); }
   if(currentModule==='usage'&&Date.now()-lastUsage>120000){ lastUsage=Date.now(); loadUsage(true); }
   if(currentModule==='gateway') loadKeys(true);
@@ -2164,6 +2258,11 @@ class H(BaseHTTPRequestHandler):
                                             "tokens": token_stats()}, ensure_ascii=False))
             except Exception as e:
                 self._send(500, json.dumps({"error": str(e)}))
+        elif path == "/api/platforms":
+            try:
+                self._send(200, json.dumps(platform_info(), ensure_ascii=False))
+            except Exception as e:
+                self._send(200, json.dumps({"ok": False, "error": str(e)[:300]}, ensure_ascii=False))
         elif path.split("?", 1)[0] == "/api/models":
             try:
                 force = "refresh=1" in (path.split("?", 1)[1] if "?" in path else "")

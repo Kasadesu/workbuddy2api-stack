@@ -1,9 +1,9 @@
-# WorkBuddy2API Stack
+# Kasa2API Stack
 
-Self-hosted integration glue for a WorkBuddy-compatible gateway:
+Self-hosted integration glue for a multi-platform API gateway managed as Kasa2API:
 
 - a standard-library Responses-to-Chat bridge for clients that send `POST /v1/responses`;
-- a small admin site for accounts, API keys, usage, token statistics, and automation;
+- a small Kasa2API admin site for platform entrypoints, accounts, API keys, usage, token statistics, and automation;
 - Caddy and systemd examples for a single VPS;
 - an opt-in WorkBuddy task sidecar;
 - offline smoke tests for translation, image input, caching/session behavior, and admin hardening.
@@ -33,7 +33,7 @@ This repository does **not** include upstream gateway source code, account files
 
 The deployment helpers intentionally refuse to run unless `DEPLOY_HOST` and `DEPLOY_SSH_KEY` are set. They contain no target host or private-key path.
 
-The admin usage view shows cached input tokens and cache hit rates when the upstream gateway includes cache counters in recent-request records. Missing counters display as `--`. Upstream gateway source is not included in this repository.
+The admin usage view shows cached input tokens and cache hit rates when the upstream gateway includes cache counters in recent-request records. Missing counters display as `--`. The `#/platforms` module documents the WorkBuddy gateway, OpenRouter passthrough, and Responses bridge boundaries. Upstream gateway source is not included in this repository.
 
 ## Optional OpenRouter route
 
