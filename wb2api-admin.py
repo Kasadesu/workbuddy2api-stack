@@ -58,7 +58,7 @@ USAGE_HISTORY_LIMIT = 240
 
 # 页面版本标记：服务端把此值嵌进 HTML，前端定时与 /api/version 比对，
 # 不一致说明后端代码已更新 → 自动重载页面，用户无需手动强刷。
-PAGE_VERSION = "v1.0.2"
+PAGE_VERSION = "v1.0.3"
 RECENT_USAGE_LIMIT = 20
 
 # 模型目录包含积分倍率，但上游接口较慢且倍率不是每秒变化；总览按需读取，
@@ -858,6 +858,19 @@ def gen_key():
     return KEY_PREFIX + secrets.token_urlsafe(32)
 
 
+def key_platforms():
+    """返回 Key 页面可切换的接入平台，不改变 Key 的共享作用域。"""
+    return [
+        {"id": "workbuddy", "name": "WorkBuddy / CodeBuddy",
+         "base_url": PUBLIC_BASE_URL, "auth": "Kasa2API Key"},
+        {"id": "responses", "name": "Responses Bridge",
+         "base_url": PUBLIC_BASE_URL + "/responses", "auth": "Kasa2API Key"},
+        {"id": "openrouter", "name": "OpenRouter",
+         "base_url": OPENROUTER_BASE_URL,
+         "auth": "OpenRouter 原生 Key（sk-or-v1-...）"},
+    ]
+
+
 def _find_block(src, name):
     """定位 Caddyfile 中 `name { ... }` 整块（按花括号配平）"""
     m = re.search(r"^" + re.escape(name) + r"\s*\{", src, re.M)
@@ -1316,8 +1329,12 @@ label.sw{float:right;color:var(--mut);font-weight:400;font-size:12px;display:inl
     <input id="keyName" placeholder="备注名（如：手机端 / 脚本 A）" style="flex:1;min-width:180px">
     <button id="btnNewKey">创建新 Key</button>
   </div>
+  <div class="row" style="margin-top:12px">
+    <label class="field" style="max-width:360px"><span>当前平台</span><select id="keyPlatform"></select></label>
+    <div id="keyPlatformInfo" class="notice" style="flex:1;margin-top:0;min-width:260px">正在读取平台入口…</div>
+  </div>
   <div id="keysBox" style="margin-top:14px"><p class="sub">加载中…</p></div>
-  <p class="sub" style="margin:12px 0 0">新建 Key 使用 <code>sk-</code> 前缀；已有 <code>wb-</code> Key 继续兼容。创建 / 停用 / 删除后会自动更新网关并生效，内置的 default 不可删除但可停用。</p>
+  <p class="sub" style="margin:12px 0 0">同一把 Kasa2API Key 可用于 WorkBuddy / CodeBuddy 和 Responses Bridge。新建 Key 使用 <code>sk-</code> 前缀；已有 <code>wb-</code> Key 继续兼容。OpenRouter 直通入口需使用调用方自己的原生 <code>sk-or-v1-...</code> Key。</p>
 </div>
 
 <div class="card"><h2>网关状态（原始）</h2><pre id="raw"></pre></div>
@@ -1928,7 +1945,42 @@ $('#btnSaveAuth').onclick=async()=>{
 };
 
 let keyReveal={};
+let keyPlatforms=[];
+let selectedKeyPlatform='workbuddy';
 const maskKey=(k)=>k.length>14?k.slice(0,10)+'••••••••••••'+k.slice(-4):k;
+function currentKeyPlatform(){
+  return keyPlatforms.find(p=>p.id===selectedKeyPlatform)||keyPlatforms[0]||null;
+}
+function renderKeyPlatform(){
+  const select=$('#keyPlatform'), info=$('#keyPlatformInfo'), p=currentKeyPlatform();
+  if(!select||!info||!p) return;
+  if(select.value!==p.id) select.value=p.id;
+  info.textContent=p.name+' · '+p.base_url+' · '+(p.id==='openrouter'?'需使用 OpenRouter 原生 sk-or-v1-... Key；Kasa2API Key 不会透传':'使用同一把 Kasa2API 通用 Key');
+}
+function renderKeyTable(){
+  const box=$('#keysBox'), keys=window.__keys||[], p=currentKeyPlatform();
+  if(!box) return;
+  let h='';
+  if(!keys.length){ h='<p class="sub">还没有 Key，在上方创建一个。</p>'; }
+  else{
+    h='<table><tr><th>备注</th><th>Key</th><th>适用范围</th><th>创建时间</th><th>状态</th><th></th></tr>';
+    h+=keys.map(k=>{
+      const rv=!!keyReveal[k.id];
+      return '<tr><td>'+esc(k.name)+(k.system?' <span style="font-size:11px;color:var(--mut)">内置</span>':'')+'</td>'+
+      '<td class="mono" style="word-break:break-all;max-width:340px">'+esc(rv?k.key:maskKey(k.key))+
+      ' <button class="ghost" style="padding:2px 8px;font-size:12px" data-act="reveal" data-id="'+esc(k.id)+'">'+(rv?'隐藏':'显示')+'</button>'+
+      ' <button class="ghost" style="padding:2px 8px;font-size:12px" data-act="copy" data-id="'+esc(k.id)+'">复制</button></td>'+
+      '<td>'+(p&&p.id==='openrouter'?'<span style="color:var(--mut)">不适用</span> <small style="display:block;color:var(--mut)">需 OpenRouter 原生 Key</small>':'<span style="color:var(--ok)">WorkBuddy / Responses 共用</span>')+'</td>'+
+      '<td>'+new Date((k.created_at||0)*1000).toLocaleDateString()+'</td>'+
+      '<td>'+(k.enabled?'<span style="color:var(--ok)">启用</span>':'<span style="color:var(--mut)">已停用</span>')+'</td>'+
+      '<td><button class="ghost" data-act="toggle" data-id="'+esc(k.id)+'">'+(k.enabled?'停用':'启用')+'</button>'+
+      (k.system?'':' <button class="danger" data-act="delkey" data-id="'+esc(k.id)+'">删除</button>')+'</td></tr>';
+    }).join('');
+    h+='</table>';
+  }
+  h+='<div class="urlbox" style="margin-top:12px">当前平台 Base URL：<b>'+esc(p&&p.base_url||'')+'</b></div>';
+  box.innerHTML=h;
+}
 async function loadKeys(silent){
   const box=$('#keysBox');
   if(!silent) box.innerHTML='<p class="sub">加载中…</p>';
@@ -1938,30 +1990,20 @@ async function loadKeys(silent){
       if(!silent) box.innerHTML='<div class="msg err" style="display:block">'+esc(r.error||'加载失败')+'</div>';
       return;
     }
-    const keys=r.keys||[]; window.__keys=keys;
-    let h='';
-    if(!keys.length){ h='<p class="sub">还没有 Key，在上方创建一个。</p>'; }
-    else{
-      h='<table><tr><th>备注</th><th>Key</th><th>创建时间</th><th>状态</th><th></th></tr>';
-      h+=keys.map(k=>{
-        const rv=!!keyReveal[k.id];
-        // 用 data-* + 事件委托，绝不在 HTML 属性里内嵌 JS：
-        // Python 三引号字符串会把 \' 吃成 '，整个 script 直接语法错误、一行都不执行
-        return '<tr><td>'+esc(k.name)+(k.system?' <span style="font-size:11px;color:var(--mut)">内置</span>':'')+'</td>'+
-        '<td class="mono" style="word-break:break-all;max-width:340px">'+esc(rv?k.key:maskKey(k.key))+
-        ' <button class="ghost" style="padding:2px 8px;font-size:12px" data-act="reveal" data-id="'+esc(k.id)+'">'+(rv?'隐藏':'显示')+'</button>'+
-        ' <button class="ghost" style="padding:2px 8px;font-size:12px" data-act="copy" data-id="'+esc(k.id)+'">复制</button></td>'+
-        '<td>'+new Date((k.created_at||0)*1000).toLocaleDateString()+'</td>'+
-        '<td>'+(k.enabled?'<span style="color:var(--ok)">启用</span>':'<span style="color:var(--mut)">已停用</span>')+'</td>'+
-        '<td><button class="ghost" data-act="toggle" data-id="'+esc(k.id)+'">'+(k.enabled?'停用':'启用')+'</button>'+
-        (k.system?'':' <button class="danger" data-act="delkey" data-id="'+esc(k.id)+'">删除</button>')+'</td></tr>';
-      }).join('');
-      h+='</table>';
+    window.__keys=r.keys||[];
+    keyPlatforms=Array.isArray(r.platforms)?r.platforms:[];
+    const select=$('#keyPlatform');
+    if(select){
+      const current=selectedKeyPlatform;
+      select.innerHTML=keyPlatforms.map(p=>'<option value="'+esc(p.id)+'">'+esc(p.name)+'</option>').join('');
+      selectedKeyPlatform=keyPlatforms.some(p=>p.id===current)?current:(keyPlatforms[0]&&keyPlatforms[0].id)||'workbuddy';
+      select.value=selectedKeyPlatform;
     }
-    h+='<div class="urlbox" style="margin-top:12px">Base URL：<b>'+esc(r.base_url||'')+'</b></div>';
-    box.innerHTML=h;
+    renderKeyPlatform();
+    renderKeyTable();
   }catch(e){ if(!silent) box.innerHTML='<div class="msg err" style="display:block">请求失败：'+esc(e.message)+'</div>'; }
 }
+$('#keyPlatform').onchange=()=>{ selectedKeyPlatform=$('#keyPlatform').value||'workbuddy'; renderKeyPlatform(); renderKeyTable(); };
 function toggleReveal(id){ keyReveal[id]=!keyReveal[id]; loadKeys(); }
 // 统一事件委托：按钮只带 data-act / data-*，不在 HTML 属性里内嵌 JS
 document.addEventListener('click',(e)=>{
@@ -2274,7 +2316,9 @@ class H(BaseHTTPRequestHandler):
                 d = ensure_keys_init()
                 ks = [{k: v for k, v in x.items()} for x in d["keys"]]
                 self._send(200, json.dumps({"ok": True, "keys": ks,
-                                            "base_url": PUBLIC_BASE_URL}))
+                                            "base_url": PUBLIC_BASE_URL,
+                                            "key_scope": "shared",
+                                            "platforms": key_platforms()}, ensure_ascii=False))
             except Exception as e:
                 self._send(200, json.dumps({"ok": False, "error": str(e)[:300]}))
         elif path == "/api/credit":

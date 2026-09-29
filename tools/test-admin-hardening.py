@@ -374,6 +374,25 @@ def test_platform_directory(m):
           "平台目录不返回账号令牌或网关密钥")
 
 
+def test_shared_key_platform_switch(m):
+    rows = m.key_platforms()
+    ids = [row.get("id") for row in rows]
+    check(ids == ["workbuddy", "responses", "openrouter"],
+          "Key 页面按 WorkBuddy、Responses、OpenRouter 提供平台切换", str(rows))
+    check(rows[0].get("base_url") == m.PUBLIC_BASE_URL and
+          rows[1].get("base_url") == m.PUBLIC_BASE_URL + "/responses" and
+          rows[2].get("base_url") == m.OPENROUTER_BASE_URL,
+          "平台切换项使用各自正确的 Base URL")
+    check(all(row.get("auth") == "Kasa2API Key" for row in rows[:2]),
+          "同一把 Kasa2API Key 可用于 WorkBuddy 和 Responses")
+    check(rows[-1].get("auth", "").startswith("OpenRouter 原生 Key"),
+          "OpenRouter 平台保留原生 Key 鉴权边界")
+    check('id="keyPlatform"' in m.PAGE and 'id="keyPlatformInfo"' in m.PAGE and
+          "同一把 Kasa2API Key 可用于 WorkBuddy / CodeBuddy 和 Responses Bridge" in m.PAGE and
+          "不适用" in m.PAGE and "需 OpenRouter 原生 Key" in m.PAGE,
+          "Key 页面显示共享范围、平台切换和 OpenRouter 鉴权区别")
+
+
 def test_recent_usage_info(m):
     m._gateway_recent_usage = lambda limit=20: {
         "enabled": True,
@@ -431,6 +450,7 @@ def main():
         test_gateway_token_stats_accumulate_and_fallback(m)
         test_page_formats_tokens_as_m(m)
         test_platform_directory(m)
+        test_shared_key_platform_switch(m)
         test_recent_usage_info(m)
     if FAILS:
         print("\n%d failures: %s" % (len(FAILS), FAILS))
