@@ -33,11 +33,7 @@ This repository does **not** include upstream gateway source code, account files
 
 The deployment helpers intentionally refuse to run unless `DEPLOY_HOST` and `DEPLOY_SSH_KEY` are set. They contain no target host or private-key path.
 
-The admin usage view shows cached input tokens and cache hit rates when the upstream gateway includes cache counters in recent-request records. Missing counters display as `--`. The `#/platforms` module documents the WorkBuddy gateway, OpenRouter passthrough, and Responses bridge boundaries. Upstream gateway source is not included in this repository.
-
-## Optional OpenRouter route
-
-The Caddy example and admin-generated site configuration expose `/openrouter/*` as a direct passthrough to OpenRouter. Configure compatible clients with `https://<PUBLIC_HOST>/openrouter/api/v1` and the caller's own OpenRouter API key. These requests bypass the WorkBuddy gateway and its account/usage pool; this proxy does not enforce model pricing or free-model selection.
+The admin usage view shows cached input tokens and cache hit rates when the upstream gateway includes cache counters in recent-request records. Missing counters display as `--`. The `#/platforms` module documents the WorkBuddy gateway and Responses bridge boundaries. Upstream gateway source is not included in this repository.
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for a full example and [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for environment variables.
 

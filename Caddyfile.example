@@ -15,12 +15,6 @@ api.example.com {
 		uri strip_prefix /admin
 		reverse_proxy 127.0.0.1:7864
 	}
-	handle_path /openrouter/* {
-		reverse_proxy https://openrouter.ai {
-			flush_interval -1
-		}
-	}
-
 	# The route utility manages this block. It translates Responses requests
 	# to the local bridge and keeps the upstream key off the public interface.
 	# >>> responses-bridge (managed) >>>

@@ -43,7 +43,6 @@ GATEWAY_TOKEN_STATS_FILE = os.path.join(ADMIN_DIR, "gateway-token-usage.json")
 CADDY_FILE = os.environ.get("CADDY_FILE", "/etc/caddy/Caddyfile")
 PUBLIC_HOST = os.environ.get("PUBLIC_HOST", "api.example.com")
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://api.example.com/v1")
-OPENROUTER_BASE_URL = "https://%s/openrouter/api/v1" % PUBLIC_HOST
 AUTOMATION = AutomationManager(BASE, CONTAINER)
 
 # 管理页所有会改动 keys.json + Caddyfile 的操作必须串行执行。
@@ -58,7 +57,7 @@ USAGE_HISTORY_LIMIT = 240
 
 # 页面版本标记：服务端把此值嵌进 HTML，前端定时与 /api/version 比对，
 # 不一致说明后端代码已更新 → 自动重载页面，用户无需手动强刷。
-PAGE_VERSION = "v1.0.4"
+PAGE_VERSION = "v1.0.5"
 RECENT_USAGE_LIMIT = 20
 
 # 模型目录包含积分倍率，但上游接口较慢且倍率不是每秒变化；总览按需读取，
@@ -560,17 +559,6 @@ def platform_info():
                 "account_count": account_count,
                 "features": ["Chat Completions", "Responses 桥接", "签到和猫猫旅行"],
             },
-            {
-                "id": "openrouter",
-                "name": "OpenRouter",
-                "type": "直通反代",
-                "status": "passthrough",
-                "base_url": OPENROUTER_BASE_URL,
-                "auth": "使用调用方自己的 OpenRouter API Key",
-                "usage": "由 OpenRouter 账号计费，不进入 WorkBuddy 积分统计",
-                "account_count": None,
-                "features": ["OpenAI 兼容模型目录", "模型请求直通"],
-            },
         ],
     }
 
@@ -852,9 +840,6 @@ def key_platforms():
     return [
         {"id": "workbuddy", "name": "WorkBuddy / CodeBuddy",
          "base_url": PUBLIC_BASE_URL, "auth": "Kasa2API Key"},
-        {"id": "openrouter", "name": "OpenRouter",
-         "base_url": OPENROUTER_BASE_URL,
-         "auth": "OpenRouter 原生 Key（sk-or-v1-...）"},
     ]
 
 
@@ -946,11 +931,6 @@ def render_api_block(keys, real_key, basicauth_user, basicauth_hash, bridge_bloc
         "\thandle /admin* {\n"
         "\t\turi strip_prefix /admin\n"
         "\t\treverse_proxy 127.0.0.1:7864\n"
-        "\t}\n"
-        "\thandle_path /openrouter/* {\n"
-        "\t\treverse_proxy https://openrouter.ai {\n"
-        "\t\t\tflush_interval -1\n"
-        "\t\t}\n"
         "\t}\n"
         + (bridge_block + "\n" if bridge_block else "") +
         "\thandle {\n"
@@ -1321,7 +1301,7 @@ label.sw{float:right;color:var(--mut);font-weight:400;font-size:12px;display:inl
     <div id="keyPlatformInfo" class="notice" style="flex:1;margin-top:0;min-width:260px">正在读取平台入口…</div>
   </div>
   <div id="keysBox" style="margin-top:14px"><p class="sub">加载中…</p></div>
-  <p class="sub" style="margin:12px 0 0">同一把 Kasa2API Key 可用于 WorkBuddy / CodeBuddy；Responses API 接口也沿用这把 Key。新建 Key 使用 <code>sk-</code> 前缀；已有 <code>wb-</code> Key 继续兼容。OpenRouter 直通入口需使用调用方自己的原生 <code>sk-or-v1-...</code> Key。</p>
+  <p class="sub" style="margin:12px 0 0">同一把 Kasa2API Key 可用于 WorkBuddy / CodeBuddy；Responses API 接口也沿用这把 Key。新建 Key 使用 <code>sk-</code> 前缀；已有 <code>wb-</code> Key 继续兼容。</p>
 </div>
 
 <div class="card"><h2>网关状态（原始）</h2><pre id="raw"></pre></div>
@@ -1942,7 +1922,7 @@ function renderKeyPlatform(){
   const select=$('#keyPlatform'), info=$('#keyPlatformInfo'), p=currentKeyPlatform();
   if(!select||!info||!p) return;
   if(select.value!==p.id) select.value=p.id;
-  info.textContent=p.name+' · '+p.base_url+' · '+(p.id==='openrouter'?'需使用 OpenRouter 原生 sk-or-v1-... Key；Kasa2API Key 不会透传':'使用同一把 Kasa2API 通用 Key');
+  info.textContent=p.name+' · '+p.base_url+' · 使用同一把 Kasa2API 通用 Key';
 }
 function renderKeyTable(){
   const box=$('#keysBox'), keys=window.__keys||[], p=currentKeyPlatform();
@@ -1957,7 +1937,7 @@ function renderKeyTable(){
       '<td class="mono" style="word-break:break-all;max-width:340px">'+esc(rv?k.key:maskKey(k.key))+
       ' <button class="ghost" style="padding:2px 8px;font-size:12px" data-act="reveal" data-id="'+esc(k.id)+'">'+(rv?'隐藏':'显示')+'</button>'+
       ' <button class="ghost" style="padding:2px 8px;font-size:12px" data-act="copy" data-id="'+esc(k.id)+'">复制</button></td>'+
-      '<td>'+(p&&p.id==='openrouter'?'<span style="color:var(--mut)">不适用</span> <small style="display:block;color:var(--mut)">需 OpenRouter 原生 Key</small>':'<span style="color:var(--ok)">WorkBuddy / Responses 共用</span>')+'</td>'+
+      '<td><span style="color:var(--ok)">WorkBuddy / Responses 共用</span></td>'+
       '<td>'+new Date((k.created_at||0)*1000).toLocaleDateString()+'</td>'+
       '<td>'+(k.enabled?'<span style="color:var(--ok)">启用</span>':'<span style="color:var(--mut)">已停用</span>')+'</td>'+
       '<td><button class="ghost" data-act="toggle" data-id="'+esc(k.id)+'">'+(k.enabled?'停用':'启用')+'</button>'+

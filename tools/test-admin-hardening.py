@@ -200,12 +200,6 @@ def test_render_admin_auth_only_protects_api(m):
     check("basicauth" in api_block, "Basic Auth 只保护管理 API")
     check("basicauth" not in page_block, "管理页本身不再触发浏览器认证框")
     check(bridge in rendered, "更新 Caddy 时保留 Responses 桥接路由")
-    check("handle_path /openrouter/* {" in rendered and
-          "reverse_proxy https://openrouter.ai" in rendered,
-          "管理页重建 Caddy 配置时保留 OpenRouter 反代")
-    openrouter = rendered.split("\thandle_path /openrouter/* {", 1)[1].split("\n\t}\n", 1)[0]
-    check("header_up Authorization" not in openrouter,
-          "OpenRouter 反代不覆盖调用方自己的 Authorization")
     check("wb\\-legacy" in rendered and "sk\\-new" in rendered,
           "Caddy 白名单同时兼容旧、新 Key")
 
@@ -366,10 +360,8 @@ def test_platform_directory(m):
     rows = got.get("platforms") or []
     ids = {row.get("id") for row in rows}
     raw = json.dumps(got, ensure_ascii=False)
-    check(got.get("brand") == "Kasa2API" and ids == {"workbuddy", "openrouter"},
-          "平台目录只包含 WorkBuddy 和 OpenRouter 上游平台", str(got))
-    check("/openrouter/api/v1" in raw and "自己的 OpenRouter API Key" in raw,
-          "平台目录说明 OpenRouter 的独立入口和认证边界")
+    check(got.get("brand") == "Kasa2API" and ids == {"workbuddy"},
+          "平台目录只包含 WorkBuddy 上游平台", str(got))
     check("access_token" not in raw and "api_key" not in raw,
           "平台目录不返回账号令牌或网关密钥")
 
@@ -377,19 +369,16 @@ def test_platform_directory(m):
 def test_shared_key_platform_switch(m):
     rows = m.key_platforms()
     ids = [row.get("id") for row in rows]
-    check(ids == ["workbuddy", "openrouter"],
-          "Key 页面只按 WorkBuddy 和 OpenRouter 提供平台切换", str(rows))
-    check(rows[0].get("base_url") == m.PUBLIC_BASE_URL and
-          rows[1].get("base_url") == m.OPENROUTER_BASE_URL,
-          "平台切换项使用各自正确的 Base URL")
+    check(ids == ["workbuddy"],
+          "Key 页面只按 WorkBuddy 提供平台切换", str(rows))
+    check(rows[0].get("base_url") == m.PUBLIC_BASE_URL,
+          "平台切换项使用 WorkBuddy Base URL")
     check(rows[0].get("auth") == "Kasa2API Key" and
           "Responses API 接口也沿用这把 Key" in m.PAGE,
           "Responses API 沿用 Kasa2API Key 但不作为平台显示")
-    check(rows[-1].get("auth", "").startswith("OpenRouter 原生 Key"),
-          "OpenRouter 平台保留原生 Key 鉴权边界")
     check('id="keyPlatform"' in m.PAGE and 'id="keyPlatformInfo"' in m.PAGE and
-          "不适用" in m.PAGE and "需 OpenRouter 原生 Key" in m.PAGE,
-          "Key 页面显示平台切换和 OpenRouter 鉴权区别")
+          "WorkBuddy / Responses 共用" in m.PAGE,
+          "Key 页面只显示 WorkBuddy 平台和 Responses 共享说明")
 
 
 def test_recent_usage_info(m):
