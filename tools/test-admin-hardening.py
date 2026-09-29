@@ -366,8 +366,8 @@ def test_platform_directory(m):
     rows = got.get("platforms") or []
     ids = {row.get("id") for row in rows}
     raw = json.dumps(got, ensure_ascii=False)
-    check(got.get("brand") == "Kasa2API" and ids == {"workbuddy", "openrouter", "responses"},
-          "平台目录包含 Kasa2API 三类入口", str(got))
+    check(got.get("brand") == "Kasa2API" and ids == {"workbuddy", "openrouter"},
+          "平台目录只包含 WorkBuddy 和 OpenRouter 上游平台", str(got))
     check("/openrouter/api/v1" in raw and "自己的 OpenRouter API Key" in raw,
           "平台目录说明 OpenRouter 的独立入口和认证边界")
     check("access_token" not in raw and "api_key" not in raw,
@@ -377,20 +377,19 @@ def test_platform_directory(m):
 def test_shared_key_platform_switch(m):
     rows = m.key_platforms()
     ids = [row.get("id") for row in rows]
-    check(ids == ["workbuddy", "responses", "openrouter"],
-          "Key 页面按 WorkBuddy、Responses、OpenRouter 提供平台切换", str(rows))
+    check(ids == ["workbuddy", "openrouter"],
+          "Key 页面只按 WorkBuddy 和 OpenRouter 提供平台切换", str(rows))
     check(rows[0].get("base_url") == m.PUBLIC_BASE_URL and
-          rows[1].get("base_url") == m.PUBLIC_BASE_URL + "/responses" and
-          rows[2].get("base_url") == m.OPENROUTER_BASE_URL,
+          rows[1].get("base_url") == m.OPENROUTER_BASE_URL,
           "平台切换项使用各自正确的 Base URL")
-    check(all(row.get("auth") == "Kasa2API Key" for row in rows[:2]),
-          "同一把 Kasa2API Key 可用于 WorkBuddy 和 Responses")
+    check(rows[0].get("auth") == "Kasa2API Key" and
+          "Responses API 接口也沿用这把 Key" in m.PAGE,
+          "Responses API 沿用 Kasa2API Key 但不作为平台显示")
     check(rows[-1].get("auth", "").startswith("OpenRouter 原生 Key"),
           "OpenRouter 平台保留原生 Key 鉴权边界")
     check('id="keyPlatform"' in m.PAGE and 'id="keyPlatformInfo"' in m.PAGE and
-          "同一把 Kasa2API Key 可用于 WorkBuddy / CodeBuddy 和 Responses Bridge" in m.PAGE and
           "不适用" in m.PAGE and "需 OpenRouter 原生 Key" in m.PAGE,
-          "Key 页面显示共享范围、平台切换和 OpenRouter 鉴权区别")
+          "Key 页面显示平台切换和 OpenRouter 鉴权区别")
 
 
 def test_recent_usage_info(m):

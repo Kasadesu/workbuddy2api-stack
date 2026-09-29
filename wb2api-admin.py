@@ -58,7 +58,7 @@ USAGE_HISTORY_LIMIT = 240
 
 # 页面版本标记：服务端把此值嵌进 HTML，前端定时与 /api/version 比对，
 # 不一致说明后端代码已更新 → 自动重载页面，用户无需手动强刷。
-PAGE_VERSION = "v1.0.3"
+PAGE_VERSION = "v1.0.4"
 RECENT_USAGE_LIMIT = 20
 
 # 模型目录包含积分倍率，但上游接口较慢且倍率不是每秒变化；总览按需读取，
@@ -571,17 +571,6 @@ def platform_info():
                 "account_count": None,
                 "features": ["OpenAI 兼容模型目录", "模型请求直通"],
             },
-            {
-                "id": "responses",
-                "name": "Responses Bridge",
-                "type": "协议桥接",
-                "status": "active",
-                "base_url": PUBLIC_BASE_URL + "/responses",
-                "auth": "使用 Kasa2API API Key",
-                "usage": "请求转发到 WorkBuddy 网关并沿用其账号池",
-                "account_count": account_count,
-                "features": ["/v1/responses", "流式事件转换", "图片输入"],
-            },
         ],
     }
 
@@ -859,12 +848,10 @@ def gen_key():
 
 
 def key_platforms():
-    """返回 Key 页面可切换的接入平台，不改变 Key 的共享作用域。"""
+    """返回 Key 页面可切换的上游平台，不把协议桥接入口列为平台。"""
     return [
         {"id": "workbuddy", "name": "WorkBuddy / CodeBuddy",
          "base_url": PUBLIC_BASE_URL, "auth": "Kasa2API Key"},
-        {"id": "responses", "name": "Responses Bridge",
-         "base_url": PUBLIC_BASE_URL + "/responses", "auth": "Kasa2API Key"},
         {"id": "openrouter", "name": "OpenRouter",
          "base_url": OPENROUTER_BASE_URL,
          "auth": "OpenRouter 原生 Key（sk-or-v1-...）"},
@@ -1334,7 +1321,7 @@ label.sw{float:right;color:var(--mut);font-weight:400;font-size:12px;display:inl
     <div id="keyPlatformInfo" class="notice" style="flex:1;margin-top:0;min-width:260px">正在读取平台入口…</div>
   </div>
   <div id="keysBox" style="margin-top:14px"><p class="sub">加载中…</p></div>
-  <p class="sub" style="margin:12px 0 0">同一把 Kasa2API Key 可用于 WorkBuddy / CodeBuddy 和 Responses Bridge。新建 Key 使用 <code>sk-</code> 前缀；已有 <code>wb-</code> Key 继续兼容。OpenRouter 直通入口需使用调用方自己的原生 <code>sk-or-v1-...</code> Key。</p>
+  <p class="sub" style="margin:12px 0 0">同一把 Kasa2API Key 可用于 WorkBuddy / CodeBuddy；Responses API 接口也沿用这把 Key。新建 Key 使用 <code>sk-</code> 前缀；已有 <code>wb-</code> Key 继续兼容。OpenRouter 直通入口需使用调用方自己的原生 <code>sk-or-v1-...</code> Key。</p>
 </div>
 
 <div class="card"><h2>网关状态（原始）</h2><pre id="raw"></pre></div>
