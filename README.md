@@ -1,52 +1,50 @@
 # Kasa2API Stack
 
-Self-hosted integration glue for a multi-platform API gateway managed as Kasa2API:
+Integration stack and bridge services for the Kasa2API gateway.
 
-- a standard-library Responses-to-Chat bridge for clients that send `POST /v1/responses`;
-- a small Kasa2API admin site for platform entrypoints, accounts, API keys, usage, token statistics, and automation;
-- Caddy and systemd examples for a single VPS;
-- an opt-in WorkBuddy task sidecar;
-- offline smoke tests for translation, image input, caching/session behavior, and admin hardening.
+## Features
 
-This repository does **not** include upstream gateway source code, account files, API keys, cookies, VPS state, or production logs. Install the upstream gateway separately and connect it to these components.
+- **Responses Bridge (`responses-bridge.py`)**: Translates `POST /v1/responses` to upstream `/v1/chat/completions`, supporting SSE streaming, image input, namespace/custom tool mapping, web search/fetch adapters, and token accounting.
+- **Admin Dashboard (`wb2api-admin.py`)**: Web UI for account management, multi-tenant API keys, usage metrics, token statistics, and automated tasks.
+- **Task Automation (`workbuddy_automation.py`)**: Scheduled check-ins and growth tasks.
+- **Production Setup**: Caddy reverse proxy templates with auth and systemd service configurations.
 
-## Layout
+## Project Structure
 
-| Path | Purpose |
+| Path | Description |
 | --- | --- |
-| `responses-bridge.py` | Responses API to Chat Completions translation, SSE conversion, tool adapters, web fetch/search adapters, image input, and token accounting |
-| `wb2api-admin.py` | Local admin HTTP service; Caddy exposes it under `/admin` |
-| `workbuddy_automation.py` | Optional check-in and growth-task sidecar |
-| `Caddyfile.example` | Generic reverse-proxy and authentication example |
-| `deploy/` | systemd units |
-| `tools/` | Deployment helpers and offline tests |
-| `docs/` | Architecture, deployment, and configuration notes |
+| `responses-bridge.py` | Responses API to Chat Completions translation bridge |
+| `wb2api-admin.py` | Local admin service and management API |
+| `workbuddy_automation.py` | Optional task automation sidecar |
+| `Caddyfile.example` | Reverse-proxy and multi-key authentication configuration |
+| `deploy/` | systemd service unit templates |
+| `tools/` | Deployment helpers and offline test suite |
+| `docs/` | Architecture and deployment documentation |
 
-## Quick start
+## Quick Start
 
-1. Install the upstream WorkBuddy-compatible gateway and make its Chat Completions endpoint available on `127.0.0.1:7863`.
-2. Copy `workbuddy2api-config.example.json` to the gateway config location and set a private upstream `api_key`.
-3. Copy `responses-bridge.py`, `wb2api-admin.py`, and `workbuddy_automation.py` to the directories used by the systemd units.
-4. Set `PUBLIC_HOST`, `PUBLIC_BASE_URL`, `WB2A_BASE`, `CADDY_FILE`, and `BRIDGE_LOG_DIR` for the host.
-5. Replace every placeholder in `Caddyfile.example`, validate it with `caddy validate`, then reload Caddy.
-6. Run the systemd units as a dedicated non-root account with permission to access Docker and the application directories.
+1. Start the upstream gateway on `127.0.0.1:7863`.
+2. Configure gateway settings using `workbuddy2api-config.example.json`.
+3. Set environment variables (see [docs/CONFIGURATION.md](docs/CONFIGURATION.md)):
+   ```sh
+   export PUBLIC_HOST=api.example.com
+   export PUBLIC_BASE_URL=https://api.example.com/v1
+   export WB2A_BASE=/opt/workbuddy2api
+   export BRIDGE_LOG_DIR=/var/log/responses-bridge
+   export CADDY_FILE=/etc/caddy/Caddyfile
+   ```
+4. Configure Caddy using `Caddyfile.example` and reload:
+   ```sh
+   caddy validate --config /etc/caddy/Caddyfile
+   systemctl reload caddy
+   ```
+5. Enable and start systemd services (see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)).
 
-The deployment helpers intentionally refuse to run unless `DEPLOY_HOST` and `DEPLOY_SSH_KEY` are set. They contain no target host or private-key path.
+## References
 
-The admin usage view shows cached input tokens and cache hit rates when the upstream gateway includes cache counters in recent-request records. Missing counters display as `--`. The `#/platforms` module documents the WorkBuddy gateway and Responses bridge boundaries. Upstream gateway source is not included in this repository.
-
-See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for a full example and [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for environment variables.
-
-## References and attribution
-
-The upstream 2API gateway is [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api). The check-in, travel, and growth-task automation concepts were referenced from [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel). The exact scope, attribution, and distinction between reference material and independent code are documented in [docs/ATTRIBUTIONS.md](docs/ATTRIBUTIONS.md).
-
-## Security model
-
-Keep the upstream key, account OAuth files, admin password, Caddy bcrypt hash, and search-provider keys outside Git. Public API keys should be generated with the `sk-` prefix by the admin page and rotated when access changes. Bind the bridge and admin services to loopback; let Caddy handle TLS and public routing.
-
-The automation sidecar is disabled for task execution by default. Review the task list and permissions before enabling it.
+- Upstream gateway: [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)
+- Automation reference: [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)
 
 ## License
 
-The integration code in this repository is released under the MIT License. See [NOTICE.md](NOTICE.md) and [docs/ATTRIBUTIONS.md](docs/ATTRIBUTIONS.md) for upstream references and licensing boundaries.
+[MIT](NOTICE.md)

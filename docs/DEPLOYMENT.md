@@ -53,4 +53,4 @@ Leave the automation unit stopped until its configuration has been reviewed. The
 
 ## Optional remote helper
 
-From a trusted workstation, set `DEPLOY_HOST` to an SSH destination and `DEPLOY_SSH_KEY` to a local key path before running `tools/deploy-bridge.py` or `tools/deploy-automation.py`. The scripts do not contain a default host and cannot deploy accidentally to the original environment.
+To deploy from a remote workstation, configure `DEPLOY_HOST` and `DEPLOY_SSH_KEY` before running `tools/deploy-bridge.py` or `tools/deploy-automation.py`.

@@ -1,16 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-在 VPS 的 Caddyfile 里幂等维护一个「受管路由块」。
+Maintain an idempotent managed routing block in VPS Caddyfile.
 
-设计要点：
-- 密钥不经过本脚本的参数：直接从 Caddyfile 现有的 @bad 校验块里解析出
-  允许的 key 正则，以及 header_up 里的内置 key，原样复用。
-- 改完先 caddy validate，通过才 reload；失败自动回滚。
-- 用显式标记注释包裹，可反复执行、可一键移除。
-
-用法（在 VPS 上以 root 执行）：
-    python3 caddy-route.py --target 7866            # 路由 /v1/responses -> 7866
+Usage (run as root on VPS):
+    python3 caddy-route.py --target 7866
     python3 caddy-route.py --target 7866 --apply
     python3 caddy-route.py --remove --apply
     python3 caddy-route.py --status
@@ -35,21 +29,17 @@ def read() -> str:
 
 
 def extract_keys(text: str):
-    """从目标站点块的 @bad 里取出 key 正则与内置 key。
-
-    必须在站点块内部搜索。以后 Caddyfile 增加其它站点时，若从全文抓第一个
-    header_regexp / header_up，可能误关联别的服务，造成密钥口径不一致。
-    """
+    """Extract key regex and builtin authorization key from target site block."""
     i, j = site_span(text)
     site = text[i:j]
     m = re.search(r'not header_regexp authcheck Authorization "\^Bearer (.+?)\$"', site)
     if not m:
-        sys.exit("目标站点块中找不到 key 校验正则，拒绝继续（避免两套口径不一致）")
+        sys.exit("Could not find key validation regex in target site block")
     keys_re = m.group(1)
 
     m2 = re.search(r'header_up Authorization "Bearer (.+?)"', site)
     if not m2:
-        sys.exit("目标站点块中找不到 header_up Authorization 内置 key，拒绝继续")
+        sys.exit("Could not find header_up Authorization builtin key in target site block")
     builtin = m2.group(1)
     return keys_re, builtin
 
@@ -78,10 +68,10 @@ def current_block(text: str):
 
 
 def site_span(text: str):
-    """定位目标站点的配置块范围（从站点行到下一个顶层 '}' ）。"""
+    """Locate range of target site configuration block."""
     m = re.search(r"^" + re.escape(SITE) + r"\s*\{", text, re.M)
     if not m:
-        sys.exit(f"在 Caddyfile 里找不到站点 {SITE}")
+        sys.exit(f"Site block not found in Caddyfile: {SITE}")
     i = m.end()
     depth = 1
     j = i
@@ -92,7 +82,7 @@ def site_span(text: str):
         elif c == "}":
             depth -= 1
         j += 1
-    return i, j - 1  # 站点块内部区间
+    return i, j - 1  # inner site block range
 
 
 def apply_new(text: str, block: str) -> str:
@@ -101,7 +91,7 @@ def apply_new(text: str, block: str) -> str:
         return text[:ex.start()] + block + text[ex.end():]
     i, j = site_span(text)
     body = text[i:j]
-    # 插到第一个 handle 之前（handle 按特异性排序，位置不影响匹配，但可读性好）
+    # insert before the first handle block
     k = body.find("\thandle")
     if k == -1:
         k = len(body.rstrip("\n\t ")) - len(body) if body.strip() else 0
@@ -141,7 +131,7 @@ def main():
             print("没有受管块，无需移除")
             return
         new = text[:ex.start()] + text[ex.end():]
-        # 清掉可能留下的连续空行
+        # collapse consecutive empty lines
         new = re.sub(r"\n{3,}", "\n\n", new)
     else:
         keys_re, builtin = extract_keys(text)

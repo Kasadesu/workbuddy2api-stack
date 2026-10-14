@@ -45,9 +45,7 @@ PUBLIC_HOST = os.environ.get("PUBLIC_HOST", "api.example.com")
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://api.example.com/v1")
 AUTOMATION = AutomationManager(BASE, CONTAINER)
 
-# 管理页所有会改动 keys.json + Caddyfile 的操作必须串行执行。
-# ThreadingHTTPServer 会并发处理请求；没有这把锁时，两个“读取-修改-写回”
-# 事务可能互相覆盖，甚至让本地状态与 Caddy 生效的 Key 集合不一致。
+# serialize operations that modify keys.json and Caddyfile
 KEY_STATE_LOCK = threading.RLock()
 USAGE_HISTORY_LOCK = threading.RLock()
 TOKEN_STATS_LOCK = threading.RLock()
@@ -55,19 +53,17 @@ ADMIN_USER_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 ADMIN_PASSWORD_MIN = 8
 USAGE_HISTORY_LIMIT = 240
 
-# 页面版本标记：服务端把此值嵌进 HTML，前端定时与 /api/version 比对，
-# 不一致说明后端代码已更新 → 自动重载页面，用户无需手动强刷。
+# version tag for frontend auto-reload
 PAGE_VERSION = "v1.0.5"
 RECENT_USAGE_LIMIT = 20
 
-# 模型目录包含积分倍率，但上游接口较慢且倍率不是每秒变化；总览按需读取，
-# 结果短暂缓存，避免自动刷新反复触发上游模型目录请求。
+# cache upstream model catalog
 MODEL_CACHE_TTL = 300
 MODEL_CACHE_LOCK = threading.RLock()
 MODEL_CACHE = {"at": 0.0, "data": None}
 MODEL_TIMEOUT = 30
 
-# ---------------- 基础工具 ----------------
+# ---------------- Helpers ----------------
 
 def get_api_key():
     try:
@@ -204,15 +200,14 @@ def _gateway_token_stats():
         has_saved_state = bool(data["updated_at"] or data["gateway_since"] or
                                any(data["last"].values()))
         if not has_saved_state:
-            # 首次接入只能知道网关进程的累计总量，不能把历史流量冒充为今日流量。
-            # 只有网关明确在今天启动时，才可安全把当前累计值记入今日。
+            # count current baseline towards today only if gateway started today
             data["total"] = dict(current)
             if (_gateway_timestamp_day(gateway_since) or
                     _gateway_timestamp_day(stats.get("now"))) == day:
                 data["days"][day] = dict(current)
         else:
             previous = data["last"]
-            # since 变化表示网关重启；新进程从当前累计值重新开始计增量。
+            # reset baseline if gateway restarted
             if data["gateway_since"] and gateway_since and data["gateway_since"] != gateway_since:
                 previous = _token_stat_row(None)
             delta = {}
@@ -226,19 +221,18 @@ def _gateway_token_stats():
         data["last"] = current
         data["gateway_since"] = gateway_since
         data["updated_at"] = now
-        # 只保留最近 90 天的日统计，累计总量不受影响。
+        # keep last 90 days of daily stats
         for old_day in sorted(data["days"])[:-90]:
             data["days"].pop(old_day, None)
         try:
             _save_token_aggregate(GATEWAY_TOKEN_STATS_FILE, data)
         except Exception:
-            # 展示不能影响网关请求；本次仍返回内存中的聚合结果。
             pass
         return _token_stats_view(data, "workbuddy2api", True)
 
 
 def _bridge_token_stats():
-    """读取旧版桥接层的安全 Token 聚合统计。"""
+    """Read token stats from responses bridge."""
     empty = _empty_token_stats("responses-bridge")
     try:
         with open(TOKEN_STATS_FILE, "r", encoding="utf-8") as f:
@@ -373,13 +367,13 @@ def record_usage_snapshot(data):
         try:
             _save_usage_history_unlocked(records)
         except Exception:
-            # 积分查询本身不能因历史文件不可写而失败。
+            # ignore history save failure
             pass
         return records
 
 
 def _gateway_usage_stats():
-    """读取新版本网关的真实 /v1/stats；旧版本返回 None，调用方走快照兼容层。"""
+    """Read /v1/stats from gateway."""
     key = get_api_key()
     try:
         req = Request("http://127.0.0.1:7863/v1/stats",
@@ -600,20 +594,20 @@ def parse_model_catalog(payload):
         models.append({
             "id": model_id,
             "name": str(raw.get("name") or model_id).strip(),
-            # 上游有时返回 "x0.03"，有时返回 "x0.03 credits"，统一为倍率本身。
+            # normalize multiplier string
             "credits": normalize_model_credits(raw.get("credits")),
         })
     return models
 
 
 def _stable_account_header(uid, purpose):
-    """生成与网关一致的稳定设备头；只基于 uid，不保存任何令牌。"""
+    """Generate stable device header based on uid."""
     value = ("wb2a:%s:%s" % (purpose, uid)).encode("utf-8")
     return hashlib.sha256(value).hexdigest()[:36]
 
 
 def _read_account_auth(account):
-    """读取单个 auth 文件中的令牌，仅在本次请求内使用。"""
+    """Read auth token for account."""
     name = str(account.get("file") or "")
     if not name or "/" in name or "\\" in name or not name.endswith(".json"):
         raise ValueError("账号文件名无效")
@@ -692,7 +686,7 @@ def model_info(force=False):
         try:
             models = _fetch_model_catalog(account)
         except Exception as exc:
-            # 错误只保留可读摘要，绝不回传请求头或账号凭据。
+            # truncate error summary without leaking headers
             errors.append({"account": label, "error": str(exc)[:200]})
             continue
         for model in models:
@@ -751,8 +745,7 @@ def write_auth(uid, realm, poll_result):
     if not auth["auth"]["accessToken"] or not uid:
         return False, "凭证不完整（缺少 access_token 或 uid）"
 
-    # uid 来自上游 OAuth 响应，不能拼进 shell 命令。只允许安全字符，
-    # 并通过 docker exec 的参数列表调用 tee，避免 shell 展开与命令注入。
+    # validate uid format and pass via docker exec args to prevent injection
     uid_s = str(uid)
     if not uid_s or len(uid_s) > 128 or not re.fullmatch(r"[A-Za-z0-9_-]+", uid_s):
         return False, "uid 含非法字符，拒绝写入"
@@ -768,12 +761,7 @@ def write_auth(uid, realm, poll_result):
     return True, "已写入 %s" % target
 
 
-# ---------------- API Key 管理 + Caddy 鉴权层 ----------------
-# 网关自身只认 config.json 里的单把 api_key，所以多 key 由 Caddy 前置校验实现：
-# 客户端带受管 key → Caddy 正则校验 → 换成网关内置 key 转发给 7863。
-
-# 新建的外部 Key 使用 OpenAI 兼容的主流前缀；旧 wb- Key 仍从 keys.json
-# 读取并继续参与 Caddy 白名单，不在这里强制轮换，避免现有客户端突然失效。
+# ---------------- API Key & Caddy Auth ----------------
 KEY_PREFIX = "sk-"
 
 
@@ -860,10 +848,8 @@ def _find_block(src, name):
 
 
 def _extract_basicauth(site_src):
-    """从 /admin* 子块中读取当前 basicauth 用户名和 bcrypt 哈希。"""
-    # site_src 本身是已删掉站点头部的内部文本，子块前面通常有 \t。
-    # 新配置只保护 /admin/api/*，旧配置保护整个 /admin*；兼容两种格式，
-    # 这样升级时仍能读取原来的用户名和 bcrypt 哈希。
+    """Read basicauth username and bcrypt hash from site block."""
+    # support both /admin/api/* and legacy /admin* blocks
     for route in ("/admin/api/\\*", "/admin\\*"):
         m_admin = re.search(r"(?m)^\s*handle\s+" + route + r"\s*\{", site_src)
         if not m_admin:
@@ -960,7 +946,7 @@ def apply_caddy(keys, basicauth_user=None, basicauth_hash=None):
     blk = _find_block(src, PUBLIC_HOST)
     if not blk:
         return False, "Caddyfile 中未找到 %s 块" % PUBLIC_HOST
-    # 只在目标站点块内找管理页凭据，避免以后新增其他 site 时误取到别处的 basicauth。
+    # extract basicauth scoped to target site block
     site_src = src[blk[0]:blk[1]]
     current = _extract_basicauth(site_src)
     if not current:
@@ -972,7 +958,7 @@ def apply_caddy(keys, basicauth_user=None, basicauth_hash=None):
     new_src = src[:blk[0]] + render_api_block(
         keys, real, new_user, new_hash, bridge_block) + src[blk[1]:]
 
-    # 不使用固定文件名，避免上次由 root 留下的临时文件阻塞管理服务。
+    # use unique temp file to avoid permission conflicts
     tmp = "/tmp/Caddyfile.wb2api." + secrets.token_hex(8)
     try:
         with open(tmp, "w", encoding="utf-8") as f:
@@ -1005,10 +991,9 @@ def apply_caddy(keys, basicauth_user=None, basicauth_hash=None):
 
 
 def hash_admin_password(password):
-    """调用 Caddy 生成 bcrypt 哈希，返回 (hash, error)。"""
+    """Hash password via caddy hash-password."""
     try:
-        # Caddy 官方实现：省略 --plaintext 时从 stdin 读取并去掉末尾换行。
-        # 这样密码不会出现在 sudo/caddy 的进程参数里。
+        # pass password via stdin to keep it out of process arguments
         p = subprocess.run(
             ["sudo", "-n", "caddy", "hash-password", "--algorithm", "bcrypt"],
             input=password + "\n",
@@ -1078,7 +1063,7 @@ def _commit_keys_locked(old_keys, new_keys):
     try:
         save_keys({"keys": new_keys})
     except Exception as e:
-        # Caddy 已生效但本地状态写失败：立刻回滚 Caddy 到旧 key 集合。
+        # rollback Caddy if keys.json save fails
         try:
             rb_ok, rb_msg = apply_caddy(old_keys)
         except Exception as rb_e:
@@ -1091,11 +1076,7 @@ def _commit_keys_locked(old_keys, new_keys):
 
 
 def mutate_keys(mutator):
-    """串行化一次 keys.json + Caddy 事务。
-
-    mutator(old_keys) 必须返回 (new_keys, result)；抛异常或返回非法结构时不提交。
-    这样创建、删除、启停三条路径共用同一套回滚语义，避免各自实现漂移。
-    """
+    """Serialize atomic keys.json + Caddy update transaction."""
     with KEY_STATE_LOCK:
         old = ensure_keys_init()["keys"]
         base = _keys_snapshot(old)
@@ -1515,7 +1496,6 @@ function show(txt,ok){const m=$('#globalMsg');m.className='msg '+(ok?'ok':'err')
 function showAuth(txt,ok){const m=$('#authMsg');m.className='msg '+(ok?'ok':'err');m.textContent=txt;m.style.display='block';}
 function setBanner(html){const b=$('#banner');if(html){b.innerHTML=html;b.style.display='block';}else{b.style.display='none';}}
 function moduleFromHash(){
-  // location.hash 包含开头的 #；先移除它，再读取 #/accounts 里的模块名。
   const name=(location.hash||'').slice(1).split('/').filter(Boolean)[0]||'';
   return MODULES.includes(name)?name:'overview';
 }
@@ -1540,8 +1520,6 @@ function activateModule(name){
 function routeModule(){activateModule(moduleFromHash());}
 window.addEventListener('hashchange',routeModule);
 async function api(path,body,timeoutMs){
-  // 页面挂在 /admin 前缀下（Caddy 做 uri strip_prefix），API 必须带前缀，
-  // 否则 /api/* 会被路由到网关 7863 而不是管理页 7864
   const headers={};
   if(body) headers['Content-Type']='application/json';
   if(authHeader) headers.Authorization=authHeader;
@@ -1972,7 +1950,7 @@ async function loadKeys(silent){
 }
 $('#keyPlatform').onchange=()=>{ selectedKeyPlatform=$('#keyPlatform').value||'workbuddy'; renderKeyPlatform(); renderKeyTable(); };
 function toggleReveal(id){ keyReveal[id]=!keyReveal[id]; loadKeys(); }
-// 统一事件委托：按钮只带 data-act / data-*，不在 HTML 属性里内嵌 JS
+// Delegated click handling
 document.addEventListener('click',(e)=>{
   const b=(e.target&&e.target.closest)?e.target.closest('button[data-act]'):null;
   if(!b) return;
@@ -2038,7 +2016,7 @@ async function delKey(id){
     else show('删除失败：'+esc(r.error||''),false);
   }catch(e){ show('请求失败：'+esc(e.message),false); }
 }
-// ---- WorkBuddy 自动化 ----
+// WorkBuddy Automation
 function autoText(v){ return Array.isArray(v)?v.join(','):String(v==null?'':v); }
 function renderGatewayAutomation(d){
   const box=$('#gatewayAutomationStatus'); if(!box) return;
@@ -2181,14 +2159,14 @@ $('#btnAutoSave').onclick=async()=>{
     else show('保存失败：'+esc(r.error||'未知错误'),false);
   }catch(e){show('保存请求失败：'+esc(e.message),false);}
 };
-// ---- 自动刷新 ----
+// Auto refresh
 function stamp(){
   const el=$('#lastUpd'); if(!el) return;
   el.textContent='数据更新于 '+new Date().toLocaleTimeString()+(autoOn?' · 每 30 秒自动刷新':' · 自动刷新已关闭');
 }
 async function tick(){
-  if(!autoOn||reloading||busy>0) return;                       // 有请求在跑就跳过，不打断用户操作
-  if(typeof document.hidden!=='undefined'&&document.hidden) return;  // 后台标签页不刷，省资源
+  if(!autoOn||reloading||busy>0) return;
+  if(typeof document.hidden!=='undefined'&&document.hidden) return;
   await refresh(); stamp();
   if(currentModule==='overview'&&Date.now()-lastModels>300000) loadModels(true);
   if(currentModule==='platforms') loadPlatforms(true);
@@ -2198,7 +2176,7 @@ async function tick(){
   if(currentModule==='automation') loadAutomation(true);
   if(currentModule==='security') loadAdminAuth();
 }
-// 服务端代码更新后，页面自己发现并重载，用户不用手动强刷
+// Hot-reload check on server deployment
 async function checkVersion(){
   if(reloading||!autoOn) return;
   try{
@@ -2214,7 +2192,7 @@ async function checkVersion(){
       paint(); b.style.display='block';
       const t=setInterval(()=>{ n--; if(n<=0){ clearInterval(t); location.reload(); } else paint(); },1000);
     }
-  }catch(e){ /* 网络抖动忽略，下一轮再试 */ }
+  }catch(e){ /* ignore network jitter */ }
 }
 $('#autoOn').onchange=()=>{
   autoOn=$('#autoOn').checked;
@@ -2232,8 +2210,7 @@ class H(BaseHTTPRequestHandler):
         pass
 
     def _norm(self):
-        """归一化路径：经 Caddy 访问时前缀 /admin 已被 strip_prefix 剥掉，
-        直连 7864 调试时不会。两种都接受，避免 404。"""
+        """Normalize request path, stripping optional /admin prefix when proxied."""
         p = self.path
         if p.startswith("/admin/"):
             p = p[len("/admin"):]
@@ -2247,8 +2224,7 @@ class H(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        # 一律不缓存：否则浏览器内存缓存里会留旧版页面/JS，
-        # 症状就是"改了代码但页面还是老样子""一直卡在加载中"
+        # disable caching
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
         self.send_header("Pragma", "no-cache")
         self.end_headers()
@@ -2259,7 +2235,7 @@ class H(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             self._send(200, PAGE, "text/html; charset=utf-8")
         elif path == "/api/version":
-            # 极轻量：前端定时比对，发现服务端更新就自动重载页面
+            # auto-reload version endpoint
             self._send(200, json.dumps({"version": PAGE_VERSION}))
         elif path == "/api/state":
             try:

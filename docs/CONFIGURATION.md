@@ -15,7 +15,7 @@
 | `DEPLOY_SSH_KEY` | unset | remote deployment helpers |
 | `REMOTE_BRIDGE_DIR` | `/opt/responses-bridge` | bridge deployment helper |
 
-Unset deployment variables are intentional: the helper exits instead of guessing a host or key.
+Deployment helpers require DEPLOY_HOST and DEPLOY_SSH_KEY to be set explicitly.
 
 ## Gateway config
 

@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-    responses-bridge
-=======================
-把 Codex 发出的 OpenAI **Responses API**（POST /v1/responses）
-翻译成上游唯一支持的 **Chat Completions API**（POST /v1/chat/completions），
-再把流式回复翻译回 Responses 事件序列。
+responses-bridge
+================
+Translates OpenAI Responses API (POST /v1/responses) requests into
+upstream Chat Completions API (POST /v1/chat/completions) calls, and
+translates upstream SSE chunks back into standard Responses SSE events.
 
-为什么需要它：新版 Codex(>=0.154) 只实现了 Responses 协议，`wire_api = "chat"`
-已被硬移除；而 workbuddy2api 网关只有 chat/completions。两者无法直接对话。
-
-设计约束：
-- 纯标准库，零第三方依赖（VPS 只有 1.8G 内存，装不下 LiteLLM 之类）。
-- 请求原文先落盘再解析，保证任何解析异常都能事后复原现场。
-- 输出的 SSE 事件尽量对齐官方 Responses API 的真实形状（多余字段无害，缺字段才会出问题）。
+Design constraints:
+- Pure standard library with zero external dependencies.
+- Request payload persistence for failure debugging.
+- Strict schema alignment with standard Responses API event stream format.
 """
 import argparse
 import gzip
@@ -40,20 +37,19 @@ VERSION = "1.7.0"
 DEFAULT_UPSTREAM = "http://127.0.0.1:7863/v1/chat/completions"
 DEFAULT_PORT = 7866
 LOG_MAX_BYTES = 8 * 1024 * 1024
-INLINE_BODY_MAX = 60000      # 超过此长度的请求体不内联，单独落盘（见 _log_request）
-BODY_KEEP = 60               # bodies/ 目录最多保留的文件数
+INLINE_BODY_MAX = 60000      # max inline request body length before dumping to file
+BODY_KEEP = 60               # max dumped body files to retain
 TOKEN_STATS_FILENAME = "token-usage.json"
 TOKEN_STATS_DAY_LIMIT = 400
 TOKEN_STATS_LOCK = threading.RLock()
 
-NS_SEP = "__"                # namespace 拍平时的连接符（chat 工具名不允许点号）
+NS_SEP = "__"                # separator for flattened namespace tools
 WEB_SEARCH_TOOL = "web_search"
-WEB_SEARCH_MAX_ROUNDS = 5    # 桥接代执行搜索的最大轮数，防止模型无限搜
+WEB_SEARCH_MAX_ROUNDS = 5    # max execution rounds for web search
 WEB_SEARCH_TIMEOUT = 20
-SNIPPET_MAX = 300            # 单条摘要截断长度，纯粹为了省 token
+SNIPPET_MAX = 300            # max snippet length (chars)
 
-# Responses hosted tool 的名字在不同 Codex/SDK 版本里出现过多种写法。
-# 对外保留原名，对内统一按“本地代执行工具”处理。
+# hosted web fetch tool aliases
 WEB_FETCH_TOOL_NAMES = frozenset((
     "webfetch", "web_fetch", "webfetch_preview", "web_fetch_preview",
 ))
@@ -65,7 +61,7 @@ WEB_FETCH_MAX_REDIRECTS = 5
 WEB_FETCH_ALLOWED_PORTS = frozenset((80, 443))
 
 
-# ---------------------------------------------------------------- 小工具
+# ---------------------------------------------------------------- Helpers
 
 def _id(prefix: str) -> str:
     return prefix + os.urandom(12).hex()
@@ -79,7 +75,7 @@ def _nonnegative_int(value):
 
 
 def normalize_usage(usage):
-    """将 Chat Completions / Responses 两种 usage 字段统一为安全计数。"""
+    """Normalize usage fields from Chat Completions or Responses into standard integer counts."""
     if not isinstance(usage, dict):
         return None
     input_tokens = _nonnegative_int(
@@ -140,7 +136,7 @@ def _load_token_stats(path):
 
 
 def record_token_usage(logdir, usage, now=None):
-    """累计一次上游响应的 usage，不记录模型正文、提示词或鉴权信息。"""
+    """Accumulate usage metrics to persistent token-usage.json without logging sensitive data."""
     normalized = normalize_usage(usage)
     if not normalized:
         return False
@@ -178,12 +174,12 @@ def record_token_usage(logdir, usage, now=None):
                 pass
         return True
     except Exception:
-        # 统计文件不可写时不能影响正常对话请求。
+        # ignore stats write failures
         return False
 
 
 def read_token_usage(logdir, now=None):
-    """读取总量和 VPS 本地日期的当日量，供管理页展示。"""
+    """Read total and today's token statistics."""
     timestamp = int(time.time() if now is None else now)
     day = time.strftime("%Y-%m-%d", time.localtime(timestamp))
     path = _token_stats_path(logdir)
@@ -211,7 +207,7 @@ def read_token_usage(logdir, now=None):
 
 
 def content_to_text(c) -> str:
-    """把 Responses 的 content（字符串或 part 数组）拍平成纯文本。"""
+    """Flatten Responses content (string or content part list) into plain text."""
     if c is None:
         return ""
     if isinstance(c, str):
@@ -238,11 +234,11 @@ def content_to_text(c) -> str:
 
 
 class UnsupportedImageError(ValueError):
-    """图片输入无法映射到 Chat Completions 时的可解释错误。"""
+    """Raised when an image input cannot be converted to Chat Completions format."""
 
 
 def _image_chat_part(p: dict) -> dict:
-    """把 Responses 的 input_image/image_url 转成 Chat 的 image_url part。"""
+    """Convert Responses input_image or image_url part into Chat image_url part format."""
     raw_url = p.get("image_url")
     detail = p.get("detail")
     if isinstance(raw_url, dict):
@@ -276,7 +272,7 @@ def _image_chat_part(p: dict) -> dict:
 
 
 def content_to_chat_content(c):
-    """把 Responses 内容转成 Chat 内容；含图片时保留多模态 part 数组。"""
+    """Convert Responses content to Chat content, preserving multimodal parts when images are present."""
     if c is None:
         return ""
     if isinstance(c, str):
@@ -315,7 +311,7 @@ def content_to_chat_content(c):
 
 
 def _parse_args(s):
-    """工具参数可能是 str / dict / None，统一成字符串。"""
+    """Serialize tool call arguments (dict/str/None) into a string."""
     if s is None:
         return ""
     if isinstance(s, str):
@@ -327,18 +323,12 @@ def _parse_args(s):
 
 
 def flat_name(namespace: str, name: str) -> str:
-    """把 namespace 工具拍成一个 chat 能表达的普通函数名。
-
-    Codex 的 namespace 工具（collaboration.* / mcp__*.js）在 Responses 里是
-    {"type":"namespace","name":"collaboration","tools":[...]}，
-    chat 协议没有嵌套概念，只能拍平。用 `__` 连接而不是 `.`，
-    因为多数后端的函数名校验只放行 [A-Za-z0-9_-]。
-    """
+    """Flatten namespaced tools (namespace + name) into a flat function name using '__' separator."""
     return "%s%s%s" % (namespace, NS_SEP, name)
 
 
 def _normalized_tool_name(name) -> str:
-    """工具名只用于本地路由判断，保持原名用于回程兼容。"""
+    """Return tool name used for local routing while preserving original format."""
     return str(name or "").strip().lower().replace("-", "_")
 
 
@@ -347,15 +337,14 @@ def is_web_fetch_name(name) -> bool:
 
 
 def web_fetch_decl_name(tool):
-    """返回 webfetch 声明应暴露给上游模型的函数名，否则返回 None。"""
+    """Return the function name to expose to upstream model for web fetch declarations, or None."""
     if not isinstance(tool, dict):
         return None
     tt = _normalized_tool_name(tool.get("type"))
     name = tool.get("name")
     if tt in WEB_FETCH_TOOL_NAMES:
         return str(name or tt)
-    # 有些兼容客户端把 hosted 工具错误/简化地写成 function；只按明确的
-    # 保留名接管，避免影响普通用户自定义函数。
+    # match hosted web fetch declared as a standard function
     if tt == "function" and is_web_fetch_name(name):
         return str(name)
     return None
@@ -366,11 +355,7 @@ def is_local_web_tool_name(name) -> bool:
 
 
 def _clean_schema(node):
-    """递归剔除 schema 里的非标准关键字。
-
-    Codex 的 collaboration 工具参数带 "encrypted": true（OpenAI 私有语义），
-    严格校验 JSON Schema 的后端会因此 400，必须剥掉。
-    """
+    """Recursively strip non-standard schema keywords."""
     if isinstance(node, dict):
         return {k: _clean_schema(v) for k, v in node.items() if k != "encrypted"}
     if isinstance(node, list):
@@ -378,7 +363,7 @@ def _clean_schema(node):
     return node
 
 
-# ---------------------------------------------------- 请求：Responses -> Chat
+# ---------------------------------------------------- Responses -> Chat Translation
 
 def to_chat_messages(req: dict):
     msgs = []
@@ -393,8 +378,8 @@ def to_chat_messages(req: dict):
     if not isinstance(inp, list):
         return msgs
 
-    pending_content = None # 暂存的 assistant 正文/多模态内容，便于与 function_call 合并
-    open_tool_msg = None   # 正在进行中的 assistant(tool_calls) 消息
+    pending_content = None # buffered assistant content to merge with function_call
+    open_tool_msg = None   # currently active assistant(tool_calls) message
 
     def flush_pending():
         nonlocal pending_content
@@ -403,7 +388,7 @@ def to_chat_messages(req: dict):
         pending_content = None
 
     def add_call(call):
-        """把一次工具调用并入当前 assistant 消息，没有就新建。"""
+        """Append a tool call into the most recent assistant message, or create one if none exists."""
         nonlocal open_tool_msg, pending_content
         if open_tool_msg is None:
             m = {"role": "assistant", "content": pending_content, "tool_calls": [call]}
@@ -448,8 +433,7 @@ def to_chat_messages(req: dict):
                 msgs.append({"role": role, "content": content})
 
         elif t == "function_call":
-            # 回放历史时，命名空间工具必须还原成拍平后的名字，
-            # 否则模型会看到一个自己没见过的工具名（工具表里只有 collaboration__spawn_agent）。
+            # restore flattened name for namespace tools
             nm = it.get("name") or ""
             ns = it.get("namespace")
             if ns:
@@ -462,16 +446,10 @@ def to_chat_messages(req: dict):
             add_tool_result(it.get("call_id"), it.get("output"))
 
         elif t == "reasoning":
-            # 上游无对应概念，只能丢弃（不影响正文与工具调用）
             continue
 
         elif t == "custom_tool_call":
-            # ⚠️ custom 工具（Codex 的 exec）输入在 `input` 字段，**不是** `arguments`。
-            # 回放时必须按模型当初产出的形状重建 —— 即 {"input": <原文>} —— 因为
-            # 上游工具表就是把 custom 工具暴露成"单字段对象"的。
-            # 漏掉这一步，历史里每次 exec 调用都会变成"空参数"：模型看到自己
-            # "调用过工具却没传任何参数"，会误判自己的调用格式有问题，反复重试和自我
-            # 纠正。外部表现就是"我的工具调用格式一直写错"。
+            # custom tools pass raw text in 'input' parameter
             raw_in = it.get("input")
             if raw_in is None:
                 raw_in = it.get("arguments")
@@ -484,7 +462,6 @@ def to_chat_messages(req: dict):
                                                            ensure_ascii=False)}})
 
         elif t in ("local_shell_call", "tool_search_call"):
-            # 回放历史时尽力还原成一次函数调用，保证上下文连贯
             args = it.get("arguments")
             if args is None and isinstance(it.get("action"), dict):
                 args = json.dumps(it["action"], ensure_ascii=False)
@@ -507,22 +484,14 @@ def to_chat_messages(req: dict):
 
 
 def to_chat_tools(tools):
-    """返回 (chat_tools, kinds, dropped, nsmap)。
+    """Convert Responses tool declarations to Chat Completions format.
 
-    Responses 的工具是扁平结构 {type:function,name,parameters}，
-    Chat Completions 是嵌套结构 {type:function,function:{...}}，需要转换。
-
-    ⚠️ v1.0.x 把 namespace 整体丢弃了，等于砍掉了 Codex 的两个核心能力：
-      - `collaboration.*`  → 子代理（spawn_agent / send_message / wait_agent ...）
-      - `mcp__cua_repl.*`  → 浏览器与 UI 自动化（js / js_reset），联网搜索的实际执行者
-    现在改为**拍平**：把 namespace 里的每个子工具提成独立的 chat 函数，
-    名字用 `<ns>__<tool>`；回程再靠 nsmap 还原成带 namespace 字段的 item。
-
-    web_search 属于 OpenAI 服务端 hosted 工具，上游 chat 后端不存在这个概念，
-    这里把它降级成一个普通函数，由桥接自己代执行（见 do_web_search）。
-
-    kinds:  扁平名 -> 回程 item 形状（function / custom / local_shell）
-    nsmap:  扁平名 -> (namespace, 原子工具名)
+    Returns:
+        (chat_tools, kinds, dropped, nsmap)
+        chat_tools: List of Chat Completions tool definitions.
+        kinds: Mapping of flattened tool name to item type (function/custom/local_shell).
+        dropped: List of unrecognized or unsupported tool names.
+        nsmap: Mapping of flattened tool name to (namespace, atomic_tool_name).
     """
     out, kinds, dropped, nsmap = [], {}, [], {}
 
@@ -579,9 +548,7 @@ def to_chat_tools(tools):
             kinds["local_shell"] = "local_shell"
 
         elif tt == "custom":
-            # custom 工具（Codex 的 exec 就是这一类）输入是自由文本而非 JSON Schema。
-            # 用一个单字段对象把它包起来，模型才表达得出来；回程时再把 input
-            # 解开，还原成自定义工具的原始输入。
+            # wrap free-form text input in single-field object schema
             desc = (t.get("description") or "") + (
                 "\n\nIMPORTANT: pass the raw free-form input (for example the exact "
                 "source code to execute) verbatim in the single `input` string "
@@ -594,7 +561,7 @@ def to_chat_tools(tools):
             kinds[name or "custom"] = "custom"
 
         elif tt == "namespace":
-            # 命名空间工具：整组提平成 `<ns>__<tool>` 普通函数。
+            # flatten namespace tools into <ns>__<tool> functions
             ns = name or "ns"
             nsdesc = (t.get("description") or "").strip()
             subs = t.get("tools") or []
@@ -612,13 +579,7 @@ def to_chat_tools(tools):
                 if nsdesc:
                     desc = "%s\n\n[namespace: %s]" % (desc, nsdesc)
 
-                # ---- 网关适配提示（实测踩出来的，不是猜的）
-                # Codex 把跨代理的任务正文（spawn_agent.message / send_message.message）
-                # 打包成 {"type":"encrypted_content","encrypted_content":<明文>} 交给子代理，
-                # 而解密用的密钥在 OpenAI 服务端 —— 走第三方网关时密文产生不出来，
-                # 子代理读到的 Payload 就是空的，会回 "No task payload was provided"。
-                # 但 fork_turns="all" 时子代理继承完整对话上下文，照样能知道要做什么
-                # （已实测：继承历史的那个子代理正确算出了结果）。
+                # prompt subagent to inherit history via fork_turns="all"
                 if ns == "collaboration" and sn == "spawn_agent":
                     desc += (
                         "\n\nIMPORTANT — GATEWAY LIMITATION: this endpoint is a "
@@ -640,7 +601,7 @@ def to_chat_tools(tools):
 
                 sub_tt = sub.get("type") or "function"
                 if sub_tt == "custom":
-                    # 自由文本子工具，同样用单字段 input 包一层
+                    # wrap raw text input in object schema
                     desc += ("\n\nIMPORTANT: pass the raw free-form input verbatim in the "
                              "single `input` string parameter.")
                     add_fn(flat, desc,
@@ -657,8 +618,7 @@ def to_chat_tools(tools):
                 nsmap[flat] = (ns, sn)
 
         elif tt == WEB_SEARCH_TOOL:
-            # Codex 的 hosted 联网搜索。上游没有这个能力，降级成本地代理执行的函数：
-            # 模型发出调用 -> 桥接真去搜 -> 结果回灌 -> 再问一轮。
+            # hosted web_search -> local function adapter
             add_fn(WEB_SEARCH_TOOL,
                    "Search the live web and return ranked result snippets. Use this "
                    "whenever the answer depends on current facts, news, prices, "
@@ -672,7 +632,7 @@ def to_chat_tools(tools):
             kinds[WEB_SEARCH_TOOL] = "function"
 
         else:
-            # image_generation / computer_use / mcp(非 namespace) ...
+            # drop unsupported tool types
             dropped.append(t.get("name") or (tt or "unknown"))
 
     return out, kinds, dropped, nsmap
@@ -684,13 +644,10 @@ def to_chat_body(req: dict):
         "model": req.get("model"),
         "messages": to_chat_messages(req),
         "stream": True,
-        # 没有这个字段时，部分 Chat Completions 网关不会在 SSE 尾部返回 usage。
+        # request stream usage from upstream
         "stream_options": {"include_usage": True},
     }
-    # workbuddy2api 的 session_sticky 会优先读取 conversation_id / prompt_cache_key。
-    # Responses 客户端有时会提供这些字段；只复制稳定会话标识，避免把任意 metadata
-    # 原样带到上游。若客户端只有 prompt_cache_key，则映射到现有网关识别的
-    # metadata.conversation_id，避免同一缓存会话在多个账号之间轮换。
+    # map session ID / prompt_cache_key to metadata.conversation_id for sticky routing
     sticky_metadata = {}
     raw_metadata = req.get("metadata")
     if isinstance(raw_metadata, dict):
@@ -715,7 +672,7 @@ def to_chat_body(req: dict):
         tc = req.get("tool_choice")
         if isinstance(tc, dict):
             if tc.get("type") == "function":
-                # tool_choice 若指名 namespace 子工具，也要换成拍平名
+                # map namespace child tool in tool_choice to flattened name
                 nm = tc.get("name") or ""
                 ns = tc.get("namespace")
                 if ns:
@@ -737,26 +694,25 @@ def to_chat_body(req: dict):
     return body, kinds, dropped, nsmap
 
 
-# ---------------------------------------------------- 响应：Chat -> Responses
+# ---------------------------------------------------- Chat -> Responses Translation
 
 class Translator:
-    """把上游 chat 流翻译成 Responses 事件序列。"""
+    """Translates upstream Chat Completions stream chunks into Responses events."""
 
     def __init__(self, model: str, kinds: dict, nsmap: dict = None):
         self.model = model
         self.kinds = kinds
-        self.nsmap = nsmap or {}   # 拍平名 -> (namespace, 原子工具名)
+        self.nsmap = nsmap or {}   # flat_name -> (namespace, original_name)
         self.seq = 0
-        self.out = []          # 已完成的 output item
-        self.n = 0             # output_index 游标
-        self.msg_id = None     # 当前文本消息 item id
-        self.msg_open = False  # 是否已发过 output_item.added
+        self.out = []          # finished output items
+        self.n = 0             # output_index cursor
+        self.msg_id = None     # current text message item id
+        self.msg_open = False  # whether output_item.added has been sent
         self.msg_text = ""
-        self.calls = {}        # 上游 tool_call index -> 状态
+        self.calls = {}        # upstream tool_call index -> state
         self.usage = None
         self.rid = _id("resp_")
 
-    # ---- 底层：产出 SSE 字节
     def ev(self, obj: dict) -> bytes:
         obj.setdefault("sequence_number", self.seq)
         self.seq += 1
@@ -787,7 +743,6 @@ class Translator:
         yield self.ev({"type": "response.created", "response": self._resp_obj("in_progress")})
         yield self.ev({"type": "response.in_progress", "response": self._resp_obj("in_progress")})
 
-    # ---- 文本消息
     def _ensure_msg(self):
         if self.msg_id is None:
             self.msg_id = _id("msg_")
@@ -829,12 +784,10 @@ class Translator:
         yield self.ev({"type": "response.output_item.done", "output_index": self.n, "item": item})
         self.out.append(item)
         self.n += 1
-        # 收尾后清空，后续若再有正文必须另起一个新的 message item，
-        # 否则会复用同一个 item id 却带着新的 output_index。
+        # reset active message item
         self.msg_id = None
         self.msg_text = ""
 
-    # ---- 工具调用
     def _call_slot(self, idx):
         if idx not in self.calls:
             self.calls[idx] = {"item_id": _id("fc_"), "call_id": None, "name": None,
@@ -845,8 +798,7 @@ class Translator:
     def tool_delta(self, idx, call_id=None, name=None, args=None):
         buf = b""
         if self.msg_open and idx not in self.calls:
-            # 正文消息必须先收尾：否则它会和紧随的工具调用抢同一个 output_index，
-            # 而 output_item.done 又会晚于工具调用发出，顺序就乱了。
+            # finalize open text message before tool call
             for b in self.close_msg():
                 buf += b
         st = self._call_slot(idx)
@@ -881,11 +833,7 @@ class Translator:
 
     @staticmethod
     def _custom_input(st):
-        """custom 工具的回程还原。
-
-        模型看到的是被包成 {"input": "..."} 的 JSON，这里要把里面的原文取出来，
-        否则 Codex 拿到的是转义过的 JSON 字符串而不是可执行的源码。
-        """
+        """Extract raw text from custom tool input parameter."""
         raw = st["args"] or ""
         try:
             a = json.loads(raw)
@@ -905,7 +853,7 @@ class Translator:
         return raw
 
     def _item(self, st, status):
-        """按原始工具类型产出对应的 Responses item。"""
+        """Build Responses item representation for tool call."""
         if st["kind"] == "local_shell":
             act = {"type": "exec", "command": [], "timeout_ms": None,
                    "env": None, "working_directory": None}
@@ -933,8 +881,7 @@ class Translator:
                 "call_id": st["call_id"], "name": nm, "arguments": st["args"]}
         ns = self.nsmap.get(nm)
         if ns:
-            # 命名空间工具：Codex 期望 name=子工具、namespace=命名空间
-            # （历史会话里官方后端返回的就是这个形状），拍平名不能泄漏给它。
+            # restore namespace and child function name
             item["name"] = ns[1]
             item["namespace"] = ns[0]
         return item
@@ -977,7 +924,7 @@ class Translator:
 
 
 def translate_chunk(t: Translator, chunk: dict):
-    """处理一条上游 chat completion chunk。"""
+    """Translate an upstream Chat Completion chunk into Responses events."""
     if isinstance(chunk.get("usage"), dict):
         u = chunk["usage"]
         t.usage = {
@@ -990,7 +937,7 @@ def translate_chunk(t: Translator, chunk: dict):
         d = ch.get("delta") or {}
         rc = d.get("reasoning_content") or d.get("reasoning")
         if isinstance(rc, str) and rc:
-            pass  # 推理内容暂不外发（Responses 的 reasoning item 结构复杂，易断流）
+            pass  # skip reasoning delta
         c = d.get("content")
         if isinstance(c, str) and c:
             for b in t.text(c):
@@ -1012,18 +959,12 @@ def translate_chunk(t: Translator, chunk: dict):
                 yield b
 
 
-# ------------------------------------------------------------ 联网搜索代执行
-#
-# Codex 的联网搜索是 OpenAI 服务端的 hosted 工具（{"type":"web_search"}），
-# 上游 chat 后端没有这个概念。桥接的做法是把它降级成一个普通函数，
-# 模型发出调用后由桥接**真实地**去搜，再把结果回灌给模型。
-# 这样 Codex 侧看到的仍然是一次普通的工具调用循环，无需伪造任何 item。
+# ------------------------------------------------------------ Web Search & Fetch
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
-# 完整的浏览器头。实测对 Bing 的结果没有影响（它照样返回泛化结果），
-# 但对 360 这类有基础反爬的引擎是必需的，所以统一带上。
+# browser request headers
 BROWSER_HEADERS = {
     "User-Agent": UA,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
@@ -1053,7 +994,7 @@ def _http_get(url, timeout=WEB_SEARCH_TIMEOUT):
 
 
 def _validate_fetch_url(url: str) -> str:
-    """校验并规范 webfetch 目标，拒绝 SSRF 常见目标。"""
+    """Validate and normalize web fetch target URL to prevent SSRF."""
     try:
         p = urllib.parse.urlsplit((url or "").strip())
         port = p.port
@@ -1109,7 +1050,7 @@ class _SafeFetchRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 def _read_limited(resp, limit: int):
-    """读取最多 limit+1 字节，避免 chunked 响应绕过 Content-Length 限制。"""
+    """Read at most limit + 1 bytes to prevent unbounded chunked responses."""
     chunks = []
     total = 0
     while total <= limit:
@@ -1125,10 +1066,10 @@ def _read_limited(resp, limit: int):
 
 def _http_fetch(url: str, timeout=WEB_FETCH_TIMEOUT,
                 max_bytes=WEB_FETCH_MAX_BYTES):
-    """抓取一个经过公网校验的页面，返回 (final_url, content_type, bytes, truncated)。"""
+    """Fetch a validated public URL, returning (final_url, content_type, bytes, truncated)."""
     target = _validate_fetch_url(url)
     headers = dict(BROWSER_HEADERS)
-    # 不主动请求 gzip，避免压缩炸弹；若站点强行返回 gzip，下面仍会解压并限长。
+    # request uncompressed content; decompress if server still sends gzip
     headers["Accept-Encoding"] = "identity"
     headers["Accept"] = "text/html,application/xhtml+xml,text/plain,application/json," \
                          "application/xml;q=0.9,*/*;q=0.1"
@@ -1159,7 +1100,7 @@ def _http_fetch(url: str, timeout=WEB_FETCH_TIMEOUT,
 
 
 class _ReadableHTMLParser(HTMLParser):
-    """只保留正文文字，去掉脚本/样式等不可读节点。"""
+    """Extract readable text content and strip scripts/styles."""
     _SKIP = frozenset(("script", "style", "noscript", "template", "svg", "canvas"))
     _BLOCK = frozenset(("address", "article", "aside", "blockquote", "br", "dd",
                         "div", "dl", "dt", "figcaption", "figure", "footer",
@@ -1217,7 +1158,7 @@ def _readable_html(raw: str):
         parser.feed(raw)
         parser.close()
     except Exception:
-        # HTML 容错失败时，退回已有的标准库正则清洗器，仍不把原始标签交给模型。
+        # fallback regex tag stripper on parser failure
         return "", _strip_tags(raw)
     title = re.sub(r"\s+", " ", " ".join(parser.title_parts)).strip()
     text = "\n".join(re.sub(r"[ \t\f\v]+", " ", line).strip()
@@ -1257,7 +1198,7 @@ def _redact_fetch_url(url: str) -> str:
 
 
 def do_web_fetch(url: str) -> str:
-    """抓取并清洗单个公网页面，返回适合回灌模型的有限长度文本。"""
+    """Fetch and sanitize a public web page into readable text for model ingestion."""
     target = (url or "").strip()
     if not target:
         return "[web_fetch error] empty URL"
@@ -1298,8 +1239,7 @@ def do_web_fetch(url: str) -> str:
 def _strip_tags(s: str) -> str:
     s = re.sub(r"<script.*?</script>", " ", s, flags=re.S | re.I)
     s = re.sub(r"<style.*?</style>", " ", s, flags=re.S | re.I)
-    # 块级闭合标签换成空格，避免 "Python</strong>.org" 被粘成 "Python.org" 之外
-    # 还出现 "Python .org" 这类怪空格（HTML 版结果里踩过）
+    # insert spaces around block and formatting tags
     s = re.sub(r"</?(?:br|p|div|li|ul|ol|h[1-6]|tr|td|table|span|strong|b|em)[^>]*>",
                " ", s, flags=re.I)
     s = re.sub(r"<[^>]+>", "", s, flags=re.S)
@@ -1307,7 +1247,7 @@ def _strip_tags(s: str) -> str:
 
 
 def _unwrap_bing(url: str) -> str:
-    """Bing 有时把结果 URL 包成 /ck/a?...&u=a1<base64url>，这里还原。"""
+    """Unwrap Bing redirect URL."""
     m = re.search(r"[?&]u=a1([A-Za-z0-9_\-]+)", url or "")
     if not m:
         return url
@@ -1321,22 +1261,14 @@ def _unwrap_bing(url: str) -> str:
 
 
 def _mostly_ascii(q: str) -> bool:
-    """英文技术查询走 ensearch=1 更准；中文查询不能带，否则结果会跑偏。"""
+    """Check if query is predominantly ASCII for English-specific search routing."""
     if not q:
         return False
     return sum(1 for c in q if ord(c) < 128) / len(q) > 0.85
 
 
 def _search_360(q):
-    """360 搜索（so.com）—— 中文查询唯一实测可用的引擎。
-
-    Bing 对中文长查询会退化成"按首字给泛化结果"：查「微信小游戏 云开发 价格」
-    返回的是微信官网、百度百科「微」字条、微博首页；换 header、先取 cookie、
-    加 mkt 参数全部无效（本机与 VPS 表现一致）。360 返回的则是
-    「微信小游戏的开发费用 - 阿里云开发者社区」这类真正命中的结果。
-
-    结果块的 data-mdurl 就是目标站点真实地址，无需跟随 so.com/link 跳转。
-    """
+    """Search via 360 (so.com)."""
     doc = _http_get("https://www.so.com/s?q=%s" % urllib.parse.quote(q))
     out = []
     for blk in re.split(r'<li[^>]*class="[^"]*res-list[^"]*"', doc)[1:22]:
@@ -1355,16 +1287,10 @@ def _search_360(q):
 
 
 def _search_bing(q):
-    """Bing 网页结果页。
-
-    ⚠️ 顺序踩过坑：一开始以为 `&format=rss` 更稳（结构化、好解析），结果实测
-    本机和 VPS 都返回**与查询完全无关**的缓存垃圾（查 "OpenAI Responses API"
-    返回韩国游戏道具站）。那个 RSS 端点像是废弃后留着的兜底池。
-    网页版 b_algo 块反而是正常结果，所以以它为主。
-    """
+    """Search via Bing."""
     url = "https://www.bing.com/search?q=%s&count=15" % urllib.parse.quote(q)
     if _mostly_ascii(q):
-        url += "&ensearch=1"      # 英文技术查询走英文结果更准
+        url += "&ensearch=1"
     doc = _http_get(url)
     out = []
     for blk in re.split(r'<li class="b_algo"', doc)[1:14]:
@@ -1373,7 +1299,7 @@ def _search_bing(q):
                       blk, re.S)
         if not a:
             continue
-        url_i = html_mod.unescape(a.group(1))   # HTML 里是 &amp;u=a1... 先还原实体
+        url_i = html_mod.unescape(a.group(1))
         title = _strip_tags(a.group(2))
         sn = re.search(r"<p[^>]*>(.*?)</p>", blk, re.S)
         out.append((title, _unwrap_bing(url_i), _strip_tags(sn.group(1)) if sn else ""))
@@ -1385,20 +1311,30 @@ def _search_bing(q):
 def _search_ddg(q):
     doc = _http_get("https://lite.duckduckgo.com/lite/?q=%s"
                     % urllib.parse.quote(q))
-    links = re.findall(r'<a[^>]+class=["\']result-link["\'][^>]*href=["\']([^"\']+)["\']'
-                       r'[^>]*>(.*?)</a>', doc, re.S)
+    links = []
+    for m in re.finditer(r'<a\s+([^>]*class=[\'"]result-link[\'"][^>]*)>(.*?)</a>', doc, re.S | re.I):
+        attrs = m.group(1)
+        title = _strip_tags(m.group(2))
+        href_m = re.search(r'href=[\'"]([^\'"]+)[\'"]', attrs)
+        if href_m and title:
+            raw_url = html_mod.unescape(href_m.group(1))
+            if "uddg=" in raw_url:
+                u_match = re.search(r'[?&]uddg=([^&]+)', raw_url)
+                if u_match:
+                    raw_url = urllib.parse.unquote(u_match.group(1))
+            links.append((raw_url, title))
     snips = re.findall(r'class=["\']result-snippet["\'][^>]*>(.*?)</td>', doc, re.S)
     out = []
     for i, (url, title) in enumerate(links[:12]):
-        out.append((_strip_tags(title), html_mod.unescape(url),
-                    _strip_tags(snips[i]) if i < len(snips) else ""))
+        s = _strip_tags(snips[i]) if i < len(snips) else ""
+        out.append((title, url, s))
     if not out:
         raise RuntimeError("ddg: no results parsed (%d bytes)" % len(doc))
     return out, "duckduckgo"
 
 
 def _http_post_json(url, payload, headers=None, timeout=WEB_SEARCH_TIMEOUT):
-    """POST 一个 JSON 体，返回 dict。商用搜索 API 都走这个形态。"""
+    """Post JSON payload and return parsed JSON response."""
     import urllib.request as _u
     req = _u.Request(url, data=json.dumps(payload).encode(), method="POST",
                      headers={"Content-Type": "application/json",
@@ -1415,10 +1351,7 @@ def _env(name):
 
 
 def _search_tavily(q):
-    """Tavily：专为 agent 设计的搜索 API，返回已清洗的正文摘要，质量远高于抓 HTML。
-
-    国内 VPS 实测可达（不带 key 时 401，约 1.1s）。免费额度每月 1000 次。
-    """
+    """Search via Tavily API."""
     key = _env("TAVILY_API_KEY")
     if not key:
         raise RuntimeError("tavily: no TAVILY_API_KEY configured")
@@ -1433,14 +1366,13 @@ def _search_tavily(q):
     out = []
     ans = (d.get("answer") or "").strip()
     if ans:
-        out.append(("直接答案", "（由 Tavily 汇总）", ans))
+        out.append(("Direct Answer", "(Tavily summary)", ans))
     out.extend(rows)
     return out, "tavily"
 
 
 def _search_serper(q):
-    """Serper：Google 结果的结构化 API。国内 VPS 实测可达（缺 key 时 403）。
-    注册送 2500 次免费额度。"""
+    """Search via Serper Google API."""
     key = _env("SERPER_API_KEY")
     if not key:
         raise RuntimeError("serper: no SERPER_API_KEY configured")
@@ -1455,10 +1387,7 @@ def _search_serper(q):
 
 
 def _query_tokens(q):
-    """把查询拆成可匹配的词：英文整词 + 中文 2-gram。
-
-    不取整段中文（"微信小游戏"整段在结果标题里几乎不会出现，只会误判为不相关）。
-    """
+    """Tokenize query into matching terms (words and 2-grams)."""
     toks = set()
     for w in re.findall(r"[A-Za-z0-9]{2,}", q or ""):
         toks.add(w.lower())
@@ -1469,13 +1398,7 @@ def _query_tokens(q):
 
 
 def _relevance(rows, q):
-    """结果集与查询的相关度（0~1）。
-
-    免费搜索引擎被风控时会**照常返回 200 和一堆结果**，只是内容与查询无关
-    （实测 360 被封后回落 Bing，查"微信小游戏 云开发 价格"返回微信官网和
-    百度百科"微"字条目）。这种结果比"搜不到"更糟 —— 模型会拿它编造答案。
-    所以每个后端返回后都要过这一关。
-    """
+    """Estimate relevance of result snippets against query tokens (0.0 to 1.0)."""
     toks = _query_tokens(q)
     if not toks or len(rows) < 3:
         return 1.0
@@ -1488,15 +1411,11 @@ RELEVANCE_MIN = 0.34
 
 
 def do_web_search(query: str) -> str:
-    """执行一次真实搜索，返回给模型看的文本结果。
+    """Execute a web search across configured providers with automatic fallback.
 
-    后端顺序（按质量排，前面没配 key 就自动跳过）：
-      1. Tavily / Serper —— 商用搜索 API，返回干净结构化结果（**优先**）
-      2. 360             —— 免费兜底，抓 HTML 解析，中英文都实测可用
-      3. Bing / DDG      —— 最后兜底（Bing 只给泛化结果，DDG 国内不通）
-
-    为什么不全用商用 API：它们要 key、要额度。没配 key 时行为与旧版一致，
-    不会退化。每个后端重试一次，跨境 TLS 握手偶发超时很常见。
+    Provider evaluation order:
+      1. Tavily / Serper (API keys required via environment variables)
+      2. 360 / Bing / DuckDuckGo (HTML scraping fallbacks)
     """
     q = (query or "").strip()
     if not q:
@@ -1508,7 +1427,7 @@ def do_web_search(query: str) -> str:
                _search_bing, _search_ddg):
         if fn in (_search_tavily, _search_serper) and not _env(
                 "TAVILY_API_KEY" if fn is _search_tavily else "SERPER_API_KEY"):
-            continue                      # 没配 key 就别浪费一次超时
+            continue  # skip if key not configured
         for attempt in (1, 2):
             try:
                 rows, src = fn(q)
@@ -1521,8 +1440,7 @@ def do_web_search(query: str) -> str:
             rel = _relevance(rows, q)
             if rel >= RELEVANCE_MIN:
                 break
-            # 拿到了结果但跟查询无关 —— 多半是反爬页被当成结果解析了。
-            # 记下来继续换下一个后端，绝不能把不相干的内容喂给模型。
+            # discard low relevance results and try next backend
             errs.append("%s: irrelevant(%.2f) e.g. %s"
                         % (fn.__name__, rel, (rows[0][0] or "")[:40]))
             rows = None
@@ -1547,34 +1465,40 @@ def do_web_search(query: str) -> str:
     return "\n".join(lines)
 
 
-# ------------------------------------------------- 上游流：缓冲与消息装配
+# ------------------------------------------------- Upstream Stream Buffering
 
 def collect_stream(resp):
-    """把一个上游响应完整读成 chunk 列表（用于需要回头看的场合）。"""
-    ctype = resp.headers.get("Content-Type") or ""
-    chunks = []
-    if "text/event-stream" in ctype:
-        for raw in resp:
-            line = raw.decode("utf-8", "replace").strip()
-            if not line or line.startswith(":") or not line.startswith("data:"):
-                continue
-            payload = line[5:].strip()
-            if payload == "[DONE]":
-                break
-            try:
-                chunks.append(json.loads(payload))
-            except Exception:
-                continue
-    else:
-        data = json.loads(resp.read().decode("utf-8", "replace"))
-        chs = data.get("choices") or [{}]
-        msg = chs[0].get("message") or {}
-        chunks.append({"choices": [{"delta": msg}], "usage": data.get("usage")})
-    return chunks
+    """Buffer entire upstream response into a list of chunks."""
+    try:
+        ctype = resp.headers.get("Content-Type") or ""
+        chunks = []
+        if "text/event-stream" in ctype:
+            for raw in resp:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line or line.startswith(":") or not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    chunks.append(json.loads(payload))
+                except Exception:
+                    continue
+        else:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+            chs = data.get("choices") or [{}]
+            msg = chs[0].get("message") or {}
+            chunks.append({"choices": [{"delta": msg}], "usage": data.get("usage")})
+        return chunks
+    finally:
+        try:
+            resp.close()
+        except Exception:
+            pass
 
 
 def assemble(chunks):
-    """把 chunk 列表拼成 (正文, {tool_call_index: {...}}, usage)。"""
+    """Assemble chunks into (text, calls_dict, usage)."""
     text = []
     calls = {}
     usage = None
@@ -1606,11 +1530,7 @@ def assemble(chunks):
 
 
 def strip_calls(chunks, drop_index):
-    """从 chunk 流里按 index 摘掉若干 tool_call。
-
-    用于把桥接自己消化掉的 web_search 调用藏干净 —— Codex 的工具表里没有这个
-    函数，任何残留都会让它报 unknown tool。
-    """
+    """Strip internal tool calls by index from chunks."""
     if not drop_index:
         return chunks
     out = []
@@ -1633,7 +1553,7 @@ def strip_calls(chunks, drop_index):
 
 
 def search_query_from_args(raw: str) -> str:
-    """从模型给的 arguments 里取 query。模型偶尔会写坏 JSON，兜底抓引号内容。"""
+    """Extract search query string from tool arguments."""
     try:
         a = json.loads(raw or "{}")
         if isinstance(a, dict):
@@ -1649,7 +1569,7 @@ def search_query_from_args(raw: str) -> str:
             return a.strip()
     except Exception:
         pass
-    # 兜底：模型偶尔写出截断/未闭合的 JSON，这里允许字符串一直到结尾
+    # fallback regex for unclosed json string
     m = re.search(r'"(?:query|q)"\s*:\s*"((?:[^"\\]|\\.)*)(?:"|$)', raw or "")
     if m:
         try:
@@ -1660,7 +1580,7 @@ def search_query_from_args(raw: str) -> str:
 
 
 def fetch_url_from_args(raw: str) -> str:
-    """从 webfetch 参数中提取 URL，兼容 url/uri/link/input 等常见形状。"""
+    """Extract target URL from webfetch tool arguments."""
     try:
         value = json.loads(raw or "{}")
     except Exception:
@@ -1693,7 +1613,7 @@ def fetch_url_from_args(raw: str) -> str:
     return walk(value)
 
 
-# ------------------------------------------------------------------ HTTP 服务
+# ------------------------------------------------------------------ HTTP Server
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -1702,7 +1622,6 @@ class Handler(BaseHTTPRequestHandler):
     logdir = os.environ.get("BRIDGE_LOG_DIR", "/var/log/responses-bridge")
     verbose = False
 
-    # ---- 基础输出
     def _json(self, code, obj, headers=None):
         body = json.dumps(obj, ensure_ascii=False).encode()
         self.send_response(code)
@@ -1715,7 +1634,7 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _retry_after_headers(exc):
-        """只透传合法的 Retry-After 秒数，避免把上游任意头带给客户端。"""
+        """Pass through valid Retry-After header seconds."""
         try:
             value = exc.headers.get("Retry-After")
             seconds = max(1, int(value))
@@ -1744,12 +1663,10 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
-    # ---- 落盘
     def _log(self, rec: dict):
         try:
             os.makedirs(self.logdir, mode=0o700, exist_ok=True)
-            # 请求日志可能含提示词、代码和业务数据，目录只对服务账号开放。
-            # 已存在目录也要收紧，避免早期版本留下的 0755 权限继续暴露。
+            # restrict log directory permissions
             try:
                 os.chmod(self.logdir, 0o700)
             except OSError:
@@ -1767,13 +1684,7 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def _log_request(self, text: str, req: dict, auth: str):
-        """请求落盘。
-
-        ⚠️ 大请求体**不要内联**进 requests.jsonl：一旦超过截断长度，整行 JSON 会在
-        字符串中途断掉，`json.loads` 直接失败 —— 于是**同一文件里所有大请求都变成
-        无法解析的脏行**，事后统计（模型分布、工具形态）全做不了。2026-09-18 排查
-        「经桥接后模型变笨」时就被这个坑挡住过。改成：小请求内联，大请求单独存文件。
-        """
+        """Record request metadata. Large bodies are written to separate files."""
         rec = {"ts": time.strftime("%F %T"), "path": self.path,
                "auth_len": len(auth), "model": req.get("model"),
                "stream": req.get("stream"), "raw_len": len(text)}
@@ -1803,7 +1714,7 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _prune_bodies(bd: str):
-        """只保留最新的 BODY_KEEP 个请求体文件，避免小磁盘被写满。"""
+        """Retain latest BODY_KEEP body files."""
         try:
             ents = sorted(((e.stat().st_mtime, e.path) for e in os.scandir(bd)),
                           reverse=True)
@@ -1815,7 +1726,6 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
-    # ---- 路由
     def do_GET(self):
         if self.path.startswith("/healthz"):
             return self._json(200, {"ok": True, "version": VERSION, "upstream": self.upstream})
@@ -1840,7 +1750,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(404, {"error": {"message": "unknown path " + self.path}})
 
         if req.get("previous_response_id"):
-            # 无状态转发，历史由 Codex 每次全量带上；这里只是记录，不做处理
+            # stateless passthrough, log only
             pass
 
         model = req.get("model") or ""
@@ -1854,7 +1764,7 @@ class Handler(BaseHTTPRequestHandler):
             }})
         if dropped:
             self._log({"ts": time.strftime("%F %T"), "dropped_tools": dropped,
-                       "note": "这些工具在 chat 协议下无法表达，已从上游工具表移除"})
+                       "note": "unsupported tools dropped for chat completions"})
         if self.verbose:
             print("[bridge] -> upstream body: %s" % json.dumps(body, ensure_ascii=False)[:4000],
                   flush=True)
@@ -1881,7 +1791,7 @@ class Handler(BaseHTTPRequestHandler):
         usage_recorded = False
 
         if has_ws or has_wf:
-            # ---- 本地联网工具路径：先替模型执行搜索/抓取，再交付最终结果。
+            # web tool execution loop
             msgs = list(body["messages"])
             local_tools_disabled = False
             while True:
@@ -1923,15 +1833,14 @@ class Handler(BaseHTTPRequestHandler):
                     break
 
                 _txt, calls, _usage = assemble(chunks)
-                # 本地工具会触发多次上游请求，每一轮都要计入总 Token。
+                # accumulate token usage for each round
                 if record_token_usage(self.logdir, _usage):
                     usage_recorded = True
                 local_calls = [c for c in calls.values()
                                if is_local_web_tool_name(c["name"])]
                 others = [c for c in calls.values()
                           if not is_local_web_tool_name(c["name"])]
-                # 只在"这一轮纯粹就是联网工具"时接管。混合调用（同时又调 exec 之类）
-                # 交给 Codex 自己走，免得把别的工具结果吞掉。
+                # handle pure web tool calls; pass mixed calls to client
                 if local_calls and not others and rounds < max(WEB_SEARCH_MAX_ROUNDS,
                                                                WEB_FETCH_MAX_ROUNDS):
                     rounds += 1
@@ -1960,11 +1869,10 @@ class Handler(BaseHTTPRequestHandler):
                     body["messages"] = msgs
                     continue
                 if local_calls and not others and not local_tools_disabled:
-                    # 联网工具预算用尽时不能直接丢调用，摘掉工具再问一轮，
-                    # 逼模型用已有结果收尾，避免只输出“我准备去核对”。
+                    # budget exhausted: strip web tools and request final completion
                     local_tools_disabled = True
                     self._log({"ts": time.strftime("%F %T"),
-                               "note": "联网工具预算用尽，摘掉本地工具让模型收尾"})
+                               "note": "web tool budget exhausted, requesting final response"})
                     body["tools"] = [x for x in (body.get("tools") or [])
                                      if not is_local_web_tool_name(
                                          x.get("function", {}).get("name"))]
@@ -2006,14 +1914,13 @@ class Handler(BaseHTTPRequestHandler):
                 for b in t.failed(fatal):
                     self._chunk(b)
             elif chunks is not None:
-                # 落到这里说明联网工具轮已结束（或达到上限）。无论哪种情况，
-                # 桥接代执行的调用都不能泄漏给 Codex，否则会被当作未知工具。
+                # strip internal web tool calls from history before emitting to client
                 _t2, calls2, _u2 = assemble(chunks)
                 drop = {i for i, c in calls2.items()
                         if is_local_web_tool_name(c["name"])}
                 if drop:
                     self._log({"ts": time.strftime("%F %T"),
-                               "note": "残留本地联网工具调用已丢弃（达轮次上限或与其它工具混用）",
+                               "note": "dropped internal web tool calls",
                                "dropped_calls": len(drop)})
                 for ch in strip_calls(chunks, drop):
                     for b in translate_chunk(t, ch):
@@ -2035,7 +1942,7 @@ class Handler(BaseHTTPRequestHandler):
                     for b in translate_chunk(t, ch):
                         self._chunk(b)
             else:
-                # 上游没按流式返回：把整段回复当成一次输出
+                # non-streaming fallback
                 raw_all = resp.read().decode("utf-8", "replace")
                 self._log({"ts": time.strftime("%F %T"), "nonstream_body": raw_all[:4000]})
                 try:
@@ -2072,6 +1979,11 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
         finally:
+            if resp:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
             self._chunk_end()
 
     def log_message(self, *a):
