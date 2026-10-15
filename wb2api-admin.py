@@ -1108,6 +1108,9 @@ PAGE = """<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Kasa2API 管理</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root{
   --bg:#0f172a;--bg-subtle:#162032;--card:#1e293b;--card-subtle:#243044;
@@ -1130,7 +1133,7 @@ PAGE = """<!doctype html>
 }
 *{box-sizing:border-box}
 [hidden]{display:none!important}
-body{margin:0;background:var(--bg);color:var(--tx);font:13.5px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;-webkit-font-smoothing:antialiased}
+body{margin:0;background:var(--bg);color:var(--tx);font:13.5px/1.55 "Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;-webkit-font-smoothing:antialiased}
 .wrap{max-width:1280px;margin:0 auto;padding:24px 20px 80px}
 .app-header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:20px;padding-bottom:18px;border-bottom:1px solid var(--bd);flex-wrap:wrap}
 .brand{display:flex;align-items:center;gap:12px}
@@ -1159,7 +1162,7 @@ body{margin:0;background:var(--bg);color:var(--tx);font:13.5px/1.55 -apple-syste
 .stat{border:1px solid var(--bd);border-radius:var(--radius);padding:16px 18px;background:var(--bg-subtle);transition:border-color .15s}
 .stat:hover{border-color:var(--bd-focus)}
 .stat .k{color:var(--mut);font-size:12px;font-weight:500}
-.stat .v{font-size:26px;font-weight:700;margin-top:6px;color:var(--tx-heading);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums;letter-spacing:-0.02em}
+.stat .v{font-size:26px;font-weight:700;margin-top:6px;color:var(--tx-heading);font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums;letter-spacing:-0.02em}
 
 .table-scroll{overflow-x:auto;border-radius:var(--radius);border:1px solid var(--bd);background:var(--card);-webkit-overflow-scrolling:touch}
 table{width:100%;border-collapse:collapse;font-size:13px}
@@ -1195,8 +1198,9 @@ select:focus,input:focus{outline:none;border-color:var(--bd-focus);box-shadow:0 
 .msg{margin-top:14px;padding:12px 14px;border-radius:var(--radius);font-size:13px;display:none;line-height:1.5}
 .msg.ok{display:block;background:var(--ok-bg);color:var(--ok);border:1px solid var(--ok-bd)}
 .msg.err{display:block;background:var(--bad-bg);color:var(--bad);border:1px solid var(--bad-bd)}
+pre,code{font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
 pre{background:var(--bg-subtle);border:1px solid var(--bd);border-radius:var(--radius);padding:12px 14px;overflow:auto;font-size:12.5px;max-height:280px;line-height:1.55;color:var(--tx)}
-.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.mono{font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-feature-settings:"tnum" 1;font-variant-numeric:tabular-nums}
 .bar{height:6px;background:var(--bd);border-radius:3px;overflow:hidden;margin-top:14px}
 .bar>i{display:block;height:100%;background:var(--ok);border-radius:3px;transition:width .3s ease}
 h2 .fr{font-size:12px;padding:4px 10px}
