@@ -32,7 +32,7 @@ def run(args, **kwargs):
 
 def main():
     if not KEY or not HOST:
-        print("请先设置 DEPLOY_HOST 和 DEPLOY_SSH_KEY；为避免误部署，脚本没有内置目标主机。", file=sys.stderr)
+        print("Please set DEPLOY_HOST and DEPLOY_SSH_KEY before running deployment.", file=sys.stderr)
         return 2
 
     for src, remote in FILES:

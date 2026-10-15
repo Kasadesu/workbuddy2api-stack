@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""离线测试 caddy-route.py 只从目标站点块读取鉴权信息。"""
+"""Offline unit tests verifying caddy-route.py scopes authorization parsing to target site."""
 import importlib.util
 import os
 import sys

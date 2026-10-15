@@ -21,6 +21,9 @@ with open(PW_FILE, encoding="utf-8") as f:
         if s.startswith("密码："):
             pw = s.split("密码：", 1)[1].strip()
             break
+        elif s.lower().startswith("password:"):
+            pw = s.split(":", 1)[1].strip()
+            break
 if not pw:
     print("ERROR: password not found in", PW_FILE)
     sys.exit(1)
@@ -39,8 +42,8 @@ print("hash prefix:", newhash[:7], "len:", len(newhash))
 with open(HASH_DST, "w", encoding="utf-8") as f:
     f.write(newhash)
 with open(CRED_DST, "w", encoding="utf-8") as f:
-    f.write("管理页登录账号: admin\n")
-    f.write("管理页登录密码: %s\n" % pw)
+    f.write("admin_user: admin\n")
+    f.write("admin_password: %s\n" % pw)
 subprocess.run(["chmod", "600", CRED_DST, HASH_DST], check=False)
 print("credentials + hash written")
 

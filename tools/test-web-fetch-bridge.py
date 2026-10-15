@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""用本地假上游验证 web_fetch 的完整两轮回灌链路。"""
+"""Integration test for web_fetch two-round replay using a local mock upstream."""
 import importlib.util
 import json
 import os
@@ -82,7 +82,7 @@ def main():
             assert "response.completed" in output, output
             assert any(x.get("role") == "tool" for x in
                        FakeUpstream.calls[1].get("messages") or []), FakeUpstream.calls[1]
-            print("web_fetch 完整回灌链路: OK")
+            print("web_fetch roundtrip: PASS")
         finally:
             bridge.shutdown()
             bridge.server_close()

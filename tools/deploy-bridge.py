@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""把桥接部署到 VPS 并重启服务（幂等，可直接重复跑）。
-
-做的事：上传 py + service → install 到配置的桥接目录与 /etc/systemd/system
-→ daemon-reload → restart → 校验 /healthz 的版本号。
-版本号对不上就说明没换成功，比"看 systemctl 说 active"可靠得多。
-"""
+"""Deploy responses-bridge and systemd service to remote host idempotently."""
 import os
 import subprocess
 import sys
@@ -27,7 +22,7 @@ def sh(args, **kw):
 
 def main():
     if not KEY or not HOST:
-        print("请先设置 DEPLOY_HOST 和 DEPLOY_SSH_KEY；为避免误部署，脚本没有内置目标主机。", file=sys.stderr)
+        print("Please set DEPLOY_HOST and DEPLOY_SSH_KEY before running deployment.", file=sys.stderr)
         return 2
 
     p = sh(["scp", "-i", KEY, "-o", "StrictHostKeyChecking=no",

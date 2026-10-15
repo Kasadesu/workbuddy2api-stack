@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-桥接服务冒烟测试：按 Responses 协议发请求，把返回的 SSE 解析成事件轨迹打印。
-用法:
-  python3 tools/bridge-smoke.py --url http://127.0.0.1:17866/v1/responses --case text
+Smoke test for responses-bridge: send Responses API requests and display parsed SSE events.
+
+Usage:
+  python3 tools/bridge-smoke.py --url http://127.0.0.1:7866/v1/responses --case text
   python3 tools/bridge-smoke.py --case tools
 """
 import argparse
@@ -62,7 +63,7 @@ def main():
     ap.add_argument("--url", default="http://127.0.0.1:17866/v1/responses")
     ap.add_argument("--case", default="text")
     ap.add_argument("--model", default="cn:deepseek-v4.1-flash")
-    ap.add_argument("--raw", action="store_true", help="打印原始 SSE")
+    ap.add_argument("--raw", action="store_true", help="Print raw SSE events")
     a = ap.parse_args()
 
     body = json.dumps(build(a.case, a.model), ensure_ascii=False).encode()
@@ -91,7 +92,7 @@ def main():
         try:
             ev = json.loads(s[5:].strip())
         except Exception as e:
-            print("!! 无法解析:", s[:200], e)
+            print("!! Parse error:", s[:200], e)
             continue
         n += 1
         t = ev.get("type")
@@ -120,9 +121,9 @@ def main():
                 extra = "out_idx=%s item_id=%s" % (ev.get("output_index"), ev.get("item_id"))
             print("%-46s %s" % (t, extra))
     print("-" * 60)
-    print("事件总数:", n)
-    print("正文:", "".join(text_buf)[:400])
-    print("事件类型统计:", json.dumps(types, ensure_ascii=False, indent=1))
+    print("Total events:", n)
+    print("Text body:", "".join(text_buf)[:400])
+    print("Event type histogram:", json.dumps(types, ensure_ascii=False, indent=1))
     return 0
 
 

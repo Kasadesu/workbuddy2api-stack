@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""联网搜索后端连通性测试（本机 / VPS 通用）。
+"""Connectivity and parsing test for search provider engines.
 
-web_search 的命门不在翻译层，而在"桥接能不能真搜到东西"。
-这个脚本分别打每个后端，把结果或异常原样打出来，方便对比不同网络环境。
-
-用法：python tools/test-web-search.py "查询词"
+Usage:
+    python tools/test-web-search.py [query]
 """
 import importlib.util
 import os
@@ -40,7 +38,7 @@ def main():
             if "-v" in sys.argv:
                 traceback.print_exc()
     print("=" * 72)
-    print("[do_web_search 汇总输出]")
+    print("[do_web_search aggregated output]")
     out = m.do_web_search(q)
     print(out[:1500])
 

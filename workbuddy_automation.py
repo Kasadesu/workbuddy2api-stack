@@ -3,12 +3,8 @@
 """Safe sidecar for WorkBuddy check-in and growth-task operations.
 
 The gateway container remains the source of truth for credentials and its
-native check-in scheduler. This module only invokes the existing container
-tools through ``docker exec`` and keeps task automation opt-in.
-
-Reference note: task concepts and scheduling flows were informed by
-linguo2625469/workbuddy2api-panel. This file is an independent implementation;
-see docs/ATTRIBUTIONS.md for the full attribution boundary.
+native check-in scheduler. This module invokes container utilities through
+docker exec with strict argument validation and error isolation.
 """
 import argparse
 import contextlib
@@ -124,7 +120,7 @@ def normalize_config(raw):
 
     cfg["task_uids"] = clean_uids(cfg.get("task_uids", []))
     if "ALL" in cfg["task_uids"] and len(cfg["task_uids"]) > 1:
-        raise ValueError("ALL 不能和其他账号同时选择")
+        raise ValueError("ALL cannot be combined with specific account UIDs")
     cfg["task_codes"] = clean_codes(cfg.get("task_codes", []))
 
     try:
@@ -168,9 +164,9 @@ def normalize_gateway_schedule(raw):
                 hours.append(hour)
         cfg[key] = sorted(hours)
     if cfg["checkin_enabled"] and not cfg["checkin_hours"]:
-        raise ValueError("启用自动签到时至少需要一个签到时间")
+        raise ValueError("at least one checkin hour is required when checkin is enabled")
     if cfg["travel_enabled"] and not cfg["travel_hours"]:
-        raise ValueError("启用猫猫旅行时至少需要一个旅行时间")
+        raise ValueError("at least one travel hour is required when travel is enabled")
     return cfg
 
 
@@ -336,13 +332,19 @@ class AutomationManager:
     def _docker_exec(self, args, timeout):
         cmd = ["docker", "exec", "-u", "10001", "-w", "/app", self.container]
         cmd.extend(str(x) for x in args)
-        p = subprocess.run(cmd, capture_output=True, timeout=timeout)
-        return p.returncode, p.stdout.decode("utf-8", "ignore"), p.stderr.decode("utf-8", "ignore")
+        try:
+            p = subprocess.run(cmd, capture_output=True, timeout=timeout)
+            return p.returncode, p.stdout.decode("utf-8", "ignore"), p.stderr.decode("utf-8", "ignore")
+        except subprocess.TimeoutExpired:
+            return 124, "", "docker exec timed out after %ds" % timeout
 
     @staticmethod
     def _host_run(args, timeout):
-        p = subprocess.run(args, capture_output=True, timeout=timeout)
-        return p.returncode, p.stdout.decode("utf-8", "ignore"), p.stderr.decode("utf-8", "ignore")
+        try:
+            p = subprocess.run(args, capture_output=True, timeout=timeout)
+            return p.returncode, p.stdout.decode("utf-8", "ignore"), p.stderr.decode("utf-8", "ignore")
+        except subprocess.TimeoutExpired:
+            return 124, "", "command timed out after %ds" % timeout
 
     @contextlib.contextmanager
     def _operation_lock(self):

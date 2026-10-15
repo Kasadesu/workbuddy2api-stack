@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""在 VPS 侧校验管理页密码：候选值 vs basicauth.hash。
+"""Verify admin password against basicauth.hash on VPS.
 
-只输出布尔结果，不打印任何一方的内容，避免回显脱敏造成误判。
-用法: python3 verify-admin-pw.py <候选密码>
+Outputs verification result without echoing secret values.
+Usage: python3 verify-admin-pw.py <candidate_password>
 """
 import os
 import sys
@@ -19,14 +19,14 @@ def main():
     print("hash_prefix=%s len=%d" % (h[:7], len(h)))
 
     matched = None
-    # 1) crypt 模块（glibc/libxcrypt 支持 $2a$ bcrypt 时可用）
+    # 1) standard crypt module (if supported by platform)
     try:
         import crypt
         matched = (crypt.crypt(cand, h) == h)
         print("via=crypt")
     except Exception as e:
         print("crypt_unavailable:", type(e).__name__)
-    # 2) bcrypt 包
+    # 2) bcrypt package fallback
     if matched is None:
         try:
             import bcrypt

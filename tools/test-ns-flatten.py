@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""桥接 v1.1 离线单测：namespace 拍平 / 回程还原 / web_search 降级 / 调用剔除。
-
-样本全部取自 2026-09-18 从 VPS 桥接日志里挖出的 **Codex 真实请求体**，
-不是凭空构造的，避免"测通过了但线上形状对不上"。
-"""
+"""Unit tests for namespace flattening, return translation, and web_search fallback."""
 import importlib.util
 import json
 import os
@@ -21,7 +17,7 @@ def load():
     return m
 
 
-# ---- 真实工具表（摘自线上请求，collaboration 只保留两个子工具以缩短用例）
+# Tool declarations matching client schemas
 REAL_TOOLS = [
     {"type": "custom", "name": "exec",
      "description": "Run JavaScript to orchestrate tool calls.",
@@ -81,39 +77,37 @@ def main():
     print("bridge VERSION =", m.VERSION)
     print("-" * 72)
 
-    # ---------- 1. 去程：namespace 拍平 ----------
+    # 1. Outbound: namespace flattening
     tools, kinds, dropped, nsmap = m.to_chat_tools(REAL_TOOLS)
     names = [t["function"]["name"] for t in tools]
-    print("拍平后的函数名:", names)
+    print("Flattened tool names:", names)
     print("nsmap:", json.dumps(nsmap, ensure_ascii=False))
     print("dropped:", dropped)
-    check(len(tools) == 8, "工具数 = 3 普通 + 4 namespace 子工具 + 1 web_search")
-    check("collaboration__spawn_agent" in names, "collaboration.spawn_agent 已拍平")
-    check("mcp__cua_repl__js" in names, "mcp__cua_repl.js 已拍平")
-    check("mcp__cua_repl__js_reset" in names, "mcp__cua_repl.js_reset 已拍平")
-    check("web_search" in names, "web_search 降级为普通函数")
-    check(dropped == [], "没有任何工具被丢弃", str(dropped))
+    check(len(tools) == 8, "Tool count: 3 standard + 4 namespace child tools + 1 web_search")
+    check("collaboration__spawn_agent" in names, "collaboration.spawn_agent flattened")
+    check("mcp__cua_repl__js" in names, "mcp__cua_repl.js flattened")
+    check("mcp__cua_repl__js_reset" in names, "mcp__cua_repl.js_reset flattened")
+    check("web_search" in names, "web_search downgraded to standard function")
+    check(dropped == [], "No tools dropped", str(dropped))
     check(nsmap.get("collaboration__spawn_agent") == ("collaboration", "spawn_agent"),
-          "nsmap 记录 (namespace, 原名)")
+          "nsmap records (namespace, original_name)")
     check(not any(t["function"]["name"] == "collaboration" for t in tools),
-          "不残留裸 namespace 名")
+          "No bare namespace names remain")
 
-    # encrypted 关键字必须剥掉，否则严格后端 400。
-    # 注意只断言 parameters —— 工具描述里是可以出现 "encrypted" 这个词的
-    # （桥接自己注入的网关限制说明就写了 encrypted payload），断言整个 tool 会误报。
+    # Private encrypted keywords stripped from schema
     spawn = [t for t in tools if t["function"]["name"] == "collaboration__spawn_agent"][0]
     params_raw = json.dumps(spawn["function"]["parameters"])
-    check("encrypted" not in params_raw, "schema 里的 encrypted 私有字段已剔除")
-    check("task_name" in params_raw, "正常参数字段保留")
+    check("encrypted" not in params_raw, "Private encrypted keyword stripped from schema")
+    check("task_name" in params_raw, "Standard parameters preserved")
     check(spawn["function"]["parameters"]["required"] == ["task_name", "message"],
-          "required 列表保留")
+          "required list preserved")
 
-    # exec(custom) 仍走 custom 语义
+    # Custom tools wrapped with single input property
     ex = [t for t in tools if t["function"]["name"] == "exec"][0]
     check(ex["function"]["parameters"]["required"] == ["input"],
-          "custom 工具仍包成单字段 input")
+          "Custom tools wrapped with input field")
 
-    # ---------- 2. 历史回放：带 namespace 的 function_call ----------
+    # 2. History replay: namespace function_call
     hist = {"input": [
         {"type": "message", "role": "user",
          "content": [{"type": "input_text", "text": "spawn a helper"}]},
@@ -131,15 +125,15 @@ def main():
     for msg in msgs:
         for tc in msg.get("tool_calls") or []:
             call_names.append(tc["function"]["name"])
-    print("历史回放后的工具名:", call_names)
+    print("Replayed tool names:", call_names)
     check(call_names == ["mcp__cua_repl__js", "collaboration__spawn_agent"],
-          "历史里的 namespace 调用还原成拍平名")
+          "Namespaced calls restored to flattened names")
     check(msgs[1]["tool_calls"][0]["function"]["arguments"] == '{"code":"await cua.getState();"}',
-          "参数原样保留")
+          "Arguments preserved")
     check([x for x in msgs if x.get("role") == "tool"][0]["content"] == "ok",
-          "工具结果保留")
+          "Tool results preserved")
 
-    # ---------- 3. 回程：item 形状带 namespace ----------
+    # 3. Inbound: item restored with namespace
     tr = m.Translator("cn:test", kinds, nsmap)
     chunks = [
         {"choices": [{"delta": {"tool_calls": [
@@ -164,18 +158,18 @@ def main():
             o = json.loads(line[6:])
             if o.get("type") == "response.output_item.done":
                 items.append(o["item"])
-    print("回程 item:", json.dumps(items, ensure_ascii=False))
-    check(len(items) == 2, "两个工具调用各自成 item")
+    print("Inbound items:", json.dumps(items, ensure_ascii=False))
+    check(len(items) == 2, "Two distinct tool items generated")
     i0, i1 = items
     check(i0["name"] == "spawn_agent" and i0.get("namespace") == "collaboration",
-          "collaboration 调用还原成 name+namespace")
+          "collaboration call restored with name and namespace")
     check(i1["name"] == "js" and i1.get("namespace") == "mcp__cua_repl",
-          "mcp__cua_repl 调用还原成 name+namespace")
+          "mcp__cua_repl call restored with name and namespace")
     check(i0["call_id"] == "call_z1" and i0["arguments"] == '{"task_name":"t9","message":"go"}',
-          "参数拼接完整且 call_id 保留")
-    check(not any("__" in it["name"] for it in items), "拍平名没有泄漏给 Codex")
+          "Arguments concatenated and call_id preserved")
+    check(not any("__" in it["name"] for it in items), "Flattened names not leaked to client")
 
-    # ---------- 4. strip_calls：剔除桥接自己消化的 web_search 调用 ----------
+    # 4. strip_calls: remove consumed web_search calls
     src = [
         {"choices": [{"delta": {"content": "let me search. ",
                                 "tool_calls": [{"index": 0, "id": "c1",
@@ -189,12 +183,12 @@ def main():
     left = [(tc["index"], tc["function"]["name"])
             for c in got for ch in c["choices"]
             for tc in (ch["delta"].get("tool_calls") or [])]
-    check(left == [(1, "exec")], "web_search 调用被摘掉，其它调用不受影响", str(left))
+    check(left == [(1, "exec")], "web_search call removed without affecting other calls", str(left))
     check(got[0]["choices"][0]["delta"]["content"] == "let me search. ",
-          "正文增量不受影响")
-    check(m.strip_calls(src, set()) is src, "drop 为空时原样返回（零开销）")
+          "Text content preserved")
+    check(m.strip_calls(src, set()) is src, "Empty drop returns original list")
 
-    # ---------- 5. search_query_from_args 容错 ----------
+    # 5. search_query_from_args parsing
     cases = [
         ('{"query":"上海天气"}', "上海天气"),
         ('{"q":"openai"}', "openai"),
@@ -205,13 +199,13 @@ def main():
     ]
     for raw, want in cases:
         got_q = m.search_query_from_args(raw)
-        check(got_q == want, "query 解析 %r" % raw[:28], "-> %r" % got_q)
+        check(got_q == want, "query parse %r" % raw[:28], "-> %r" % got_q)
 
     print("-" * 72)
     if FAILS:
-        print("失败 %d 项: %s" % (len(FAILS), FAILS))
+        print("FAILURES (%d): %s" % (len(FAILS), FAILS))
         return 1
-    print("全部通过")
+    print("All tests passed")
     return 0
 
 

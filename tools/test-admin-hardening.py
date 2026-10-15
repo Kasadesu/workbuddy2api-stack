@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""离线测试管理页的安全与状态一致性修复。
-
-不依赖 VPS：用临时目录替换 keys.json / Caddyfile，注入假的 apply_caddy，
-验证命令注入拦截、Caddy 失败回滚、keys.json 写失败回滚、并发串行化。
-"""
+"""Offline test suite for admin security hardening, transaction rollbacks, and concurrency isolation."""
 import importlib.util
 import json
 import os

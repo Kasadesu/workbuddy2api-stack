@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
- Kasa2API 管理面板（WorkBuddy 兼容网关管理）
-- 只监听 127.0.0.1，公网页面由 Caddy 反代 + TLS 把关，API 继续使用 Basic Auth
-- 对 auths/ 的所有读写都以容器 uid 10001 身份 docker exec 执行
-  （宿主机 admin 对该目录无写权限，且属主非 10001 会导致账号数为 0）
+"""Administration daemon and management interface for the API gateway stack.
+
+- Binds to 127.0.0.1; public routing and TLS termination are managed by reverse proxy.
+- File operations on auth credentials are executed under container UID 10001 via docker exec
+  to maintain filesystem permission boundaries with gateway processes.
 """
 import json
 import hashlib
@@ -73,20 +73,26 @@ def get_api_key():
         return ""
 
 
-def dexec(args, stdin_bytes=None, timeout=180, user="10001"):
-    """在容器内以 uid 10001 执行命令"""
+def dexec(args, stdin_bytes=None, timeout=60, user="10001"):
+    """Execute command inside container under specified user."""
     cmd = ["docker", "exec", "-u", user, "-w", "/app"]
     if stdin_bytes is not None:
         cmd.append("-i")
     cmd += [CONTAINER] + list(args)
-    p = subprocess.run(cmd, input=stdin_bytes, capture_output=True, timeout=timeout)
-    return p.returncode, p.stdout.decode("utf-8", "ignore"), p.stderr.decode("utf-8", "ignore")
+    try:
+        p = subprocess.run(cmd, input=stdin_bytes, capture_output=True, timeout=timeout)
+        return p.returncode, p.stdout.decode("utf-8", "ignore"), p.stderr.decode("utf-8", "ignore")
+    except subprocess.TimeoutExpired:
+        return 124, "", "docker exec timed out after %ds" % timeout
 
 
-def docker_host(args, timeout=120):
-    """宿主机 docker 命令（restart 等）"""
-    p = subprocess.run(["docker"] + list(args), capture_output=True, timeout=timeout)
-    return p.returncode, p.stdout.decode("utf-8", "ignore"), p.stderr.decode("utf-8", "ignore")
+def docker_host(args, timeout=60):
+    """Execute docker command on the host."""
+    try:
+        p = subprocess.run(["docker"] + list(args), capture_output=True, timeout=timeout)
+        return p.returncode, p.stdout.decode("utf-8", "ignore"), p.stderr.decode("utf-8", "ignore")
+    except subprocess.TimeoutExpired:
+        return 124, "", "docker command timed out after %ds" % timeout
 
 
 def _empty_token_stats(source="responses-bridge"):
@@ -129,7 +135,7 @@ def _token_stat_row(raw):
 
 
 def _token_stats_view(data, source, available=True):
-    """把持久聚合文件转换为管理页使用的统一字段。"""
+    """Format token usage stats dictionary for admin dashboard response."""
     data = data if isinstance(data, dict) else {}
     total = _token_stat_row(data.get("total"))
     day = time.strftime("%Y-%m-%d", time.localtime())
@@ -181,13 +187,13 @@ def _save_token_aggregate(path, data):
 
 
 def _gateway_timestamp_day(value):
-    """读取网关 ISO 时间戳的日期部分；网关时间已按 VPS 时区输出。"""
+    """Extract YYYY-MM-DD date prefix from gateway timestamp."""
     text = str(value or "").strip()
     return text[:10] if re.match(r"^\d{4}-\d{2}-\d{2}", text) else ""
 
 
 def _gateway_token_stats():
-    """以网关 /v1/stats 为准累计 Token，覆盖直连网关和桥接转发流量。"""
+    """Aggregate token usage from gateway stats API."""
     stats = _gateway_usage_stats()
     if not isinstance(stats, dict) or not isinstance(stats.get("total"), dict):
         return None
@@ -249,7 +255,7 @@ def _bridge_token_stats():
 
 
 def _cached_gateway_token_stats():
-    """网关统计接口暂时不可用时，保留最近一次成功采集的累计值。"""
+    """Return cached gateway stats when live stats endpoint is temporarily unavailable."""
     try:
         data = _load_token_aggregate(GATEWAY_TOKEN_STATS_FILE)
         total = data.get("total") or {}
@@ -263,13 +269,13 @@ def _cached_gateway_token_stats():
 
 
 def token_stats():
-    """优先读取网关全量统计；接口暂时不可用时保留缓存，再回退桥接层。"""
+    """Retrieve aggregated token stats from gateway, cached file, or bridge stats."""
     return (_gateway_token_stats() or _cached_gateway_token_stats() or
             _bridge_token_stats())
 
 
 def gw_status():
-    """读取网关 /status 与 /healthz"""
+    """Fetch gateway /status and /healthz endpoints."""
     out = {}
     key = get_api_key()
     for name, path in (("status", "/status"), ("healthz", "/healthz")):
@@ -286,7 +292,7 @@ def gw_status():
 
 
 def credit_info():
-    """调用容器内官方 credit 二进制查积分（remain/used/size/packages）"""
+    """Query container credit CLI tool for account balances."""
     rc, out, err = dexec(["/app/credit"], timeout=90)
     if rc != 0:
         return {"ok": False, "error": (err or out).strip()[:300]}
@@ -326,7 +332,7 @@ def _usage_int(value):
 
 
 def _usage_snapshot(data):
-    """只保存余额/已用等公开统计字段，不把 credit 工具的其它输出落盘。"""
+    """Sanitize and persist only non-sensitive account credit balance metrics."""
     total = data.get("total") if isinstance(data, dict) else {}
     total = total if isinstance(total, dict) else {}
     accounts = []
@@ -353,7 +359,7 @@ def _usage_snapshot(data):
 
 
 def record_usage_snapshot(data):
-    """记录积分查询快照；短时间内相同值不重复写入。"""
+    """Record periodic credit balance snapshot, skipping duplicates within 60s."""
     snapshot = _usage_snapshot(data)
     with USAGE_HISTORY_LOCK:
         records = _load_usage_history_unlocked()
@@ -385,7 +391,7 @@ def _gateway_usage_stats():
 
 
 def _gateway_recent_usage(limit=RECENT_USAGE_LIMIT):
-    """读取网关按请求保存的最近安全摘要；旧版本返回 None。"""
+    """Retrieve sanitized recent request summaries from gateway."""
     key = get_api_key()
     try:
         req = Request("http://127.0.0.1:7863/v1/stats/recent",
@@ -405,7 +411,7 @@ def _gateway_recent_usage(limit=RECENT_USAGE_LIMIT):
 
 
 def recent_usage_info(limit=RECENT_USAGE_LIMIT):
-    """返回网关最近逐请求记录，最新在前。"""
+    """Return normalized recent request logs ordered chronologically."""
     payload = _gateway_recent_usage(limit)
     if not isinstance(payload, dict):
         return {"ok": False, "source": "workbuddy2api", "records": []}
@@ -458,7 +464,7 @@ def recent_usage_info(limit=RECENT_USAGE_LIMIT):
 
 
 def usage_info():
-    """返回真实网关统计或兼容旧网关的积分余额变化记录。"""
+    """Fetch real-time usage metrics and account balance snapshots."""
     credit = credit_info()
     if not credit.get("ok"):
         return {"ok": False, "error": credit.get("error") or "查询积分失败"}
@@ -508,7 +514,7 @@ def usage_info():
 
 
 def list_accounts():
-    """列出 auths/ 下的账号（uid / nickname / realm）"""
+    """List accounts under auths/ directory."""
     rc, out, err = dexec(["ls", "-1", C_AUTH])
     if rc != 0:
         return []
@@ -533,7 +539,7 @@ def list_accounts():
 
 
 def platform_info():
-    """返回 Kasa2API 的平台目录，不包含任何密钥、令牌或账号凭据。"""
+    """Return platform directory without exposing sensitive credentials."""
     try:
         account_count = len(list_accounts())
     except Exception:
@@ -558,13 +564,13 @@ def platform_info():
 
 
 def normalize_model_credits(value):
-    """统一官方目录中倍率后缀的两种写法：x0.03 / x0.03 credits。"""
+    """Normalize model credit multiplier strings by stripping trailing units."""
     text = str(value or "").strip()
     return re.sub(r"\s+credits?\s*$", "", text, flags=re.IGNORECASE).strip()
 
 
 def parse_model_catalog(payload):
-    """解析官方模型目录，只保留 CLI 可用模型的公开展示字段。"""
+    """Parse upstream model catalog, filtering for CLI-enabled models."""
     if not isinstance(payload, dict):
         raise ValueError("模型目录格式无效")
     code = payload.get("code")
@@ -630,7 +636,7 @@ def _read_account_auth(account):
 
 
 def _fetch_model_catalog(account):
-    """从账号所属官方域读取模型倍率，不把令牌带出本函数。"""
+    """Fetch model catalog from upstream domain without leaking access tokens."""
     auth = _read_account_auth(account)
     if auth["realm"] == "global":
         base = "https://www.workbuddy.ai"
@@ -671,7 +677,7 @@ def invalidate_model_cache():
 
 
 def model_info(force=False):
-    """返回合并后的模型倍率；不同账号返回不同倍率时全部保留。"""
+    """Fetch and merge model catalogs across all configured accounts."""
     now = time.time()
     with MODEL_CACHE_LOCK:
         if (not force and MODEL_CACHE["data"] is not None and
@@ -715,7 +721,7 @@ def model_info(force=False):
 
 
 def extract_json(text):
-    """从输出中抠出第一个完整 JSON 对象"""
+    """Extract outermost JSON object from string output."""
     s = text.find("{")
     e = text.rfind("}")
     if s == -1 or e == -1 or e <= s:
@@ -727,7 +733,7 @@ def extract_json(text):
 
 
 def write_auth(uid, realm, poll_result):
-    """按官方嵌套格式写 auth 文件（属主 10001），返回 (ok, msg)"""
+    """Write account authentication credentials file inside container."""
     auth = {
         "account": {
             "uid": str(uid),
@@ -789,7 +795,7 @@ def save_keys(d):
 
 
 def ensure_keys_init():
-    """首次运行把 config.json 现存 api_key 导入为系统 key，保证已有接入不断"""
+    """Ensure keys.json is initialized with the primary gateway API key."""
     with KEY_STATE_LOCK:
         d = load_keys()
         if not d["keys"]:
@@ -824,7 +830,7 @@ def gen_key():
 
 
 def key_platforms():
-    """返回 Key 页面可切换的上游平台，不把协议桥接入口列为平台。"""
+    """Return supported platforms for API key assignment."""
     return [
         {"id": "workbuddy", "name": "WorkBuddy / CodeBuddy",
          "base_url": PUBLIC_BASE_URL, "auth": "Kasa2API Key"},
@@ -832,7 +838,7 @@ def key_platforms():
 
 
 def _find_block(src, name):
-    """定位 Caddyfile 中 `name { ... }` 整块（按花括号配平）"""
+    """Locate balanced Caddyfile site block by name."""
     m = re.search(r"^" + re.escape(name) + r"\s*\{", src, re.M)
     if not m:
         return None
@@ -876,7 +882,7 @@ def _extract_basicauth(site_src):
 
 
 def read_admin_auth():
-    """读取管理页当前 Basic Auth 用户名和哈希；失败时返回 None。"""
+    """Read admin HTTP Basic Auth credentials from Caddyfile."""
     try:
         with open(CADDY_FILE, "r", encoding="utf-8") as f:
             src = f.read()
@@ -892,7 +898,7 @@ def read_admin_auth():
 
 
 def _extract_managed_bridge(site_src):
-    """保留 Responses 桥接工具插入的受管路由块。"""
+    """Extract managed responses-bridge routing block from site configuration."""
     m = re.search(
         r"(?ms)^\s*# >>> responses-bridge \(managed\) >>>.*?"
         r"^\s*# <<< responses-bridge \(managed\) <<<\s*",
@@ -935,7 +941,7 @@ def render_api_block(keys, real_key, basicauth_user, basicauth_hash, bridge_bloc
 
 
 def apply_caddy(keys, basicauth_user=None, basicauth_hash=None):
-    """写入 key 列表和可选的管理页凭据到 Caddyfile；失败自动回滚。"""
+    """Render, validate, and apply updated keys and credentials to Caddyfile with rollback."""
     real = get_api_key()
     try:
         with open(CADDY_FILE, "r", encoding="utf-8") as f:
@@ -1011,7 +1017,7 @@ def hash_admin_password(password):
 
 
 def update_admin_credentials(username, password):
-    """更新管理页 Basic Auth 用户名和密码；密码为空时保留原密码。"""
+    """Update admin Basic Auth username and password in Caddyfile."""
     username = (username or "").strip()
     if not ADMIN_USER_RE.fullmatch(username):
         return False, "用户名只允许 1-64 位字母、数字、点、下划线和横线"
@@ -1041,16 +1047,15 @@ def update_admin_credentials(username, password):
 
 
 def _keys_snapshot(keys):
-    """深拷贝，供事务失败时恢复内存状态。"""
+    """Deep copy keys list for atomic transaction isolation."""
     return json.loads(json.dumps(keys, ensure_ascii=False))
 
 
 def _commit_keys_locked(old_keys, new_keys):
-    """在持锁前提下提交 keys.json + Caddy；失败恢复到 old_keys。
+    """Apply updated keys to Caddy and commit to keys.json while holding KEY_STATE_LOCK.
 
-    返回 (ok, msg, committed_keys)。调用方必须已经持有 KEY_STATE_LOCK。
-    先写 Caddy 再写 keys.json：Caddy 失败时磁盘上的 keys.json 仍未改变；
-    这样即使进程在两步之间崩溃，也不会留下“本地已删、线上仍生效”的状态。
+    Applies to Caddy first so keys.json remains unchanged on validation/reload failure.
+    Rolls back Caddy if persisting keys.json fails.
     """
     try:
         ok, msg = apply_caddy(new_keys)
@@ -1348,12 +1353,12 @@ label.sw{float:right;color:var(--mut);font-weight:400;font-size:12px;display:inl
 const $=(s)=>document.querySelector(s);
 const PAGE_VERSION='__PAGE_VER__';
 let curRealm='cn';
-let autoOn=true;      // 自动刷新开关
-let busy=0;           // 进行中的请求数（>0 时跳过自动刷新，避免打断用户操作）
-let reloading=false;  // 已触发自动重载
-let lastCredit=0;     // 上次查积分的时间戳
-let lastModels=0;     // 上次查模型倍率的时间戳
-let lastUsage=0;      // 上次查积分使用记录的时间戳
+let autoOn=true;
+let busy=0;
+let reloading=false;
+let lastCredit=0;
+let lastModels=0;
+let lastUsage=0;
 const MODULES=['overview','platforms','accounts','usage','gateway','automation','security'];
 let currentModule='overview';
 let authHeader='';
@@ -1525,7 +1530,6 @@ async function api(path,body,timeoutMs){
   if(authHeader) headers.Authorization=authHeader;
   const opt=body?{method:'POST',headers:headers,body:JSON.stringify(body)}:{headers:headers};
   const ms=timeoutMs||30000;
-  // 没有超时的话，请求一旦卡住就永远停在"加载中"，所以必须兜住
   const ctl=(typeof AbortController!=='undefined')?new AbortController():null;
   let timer=null;
   if(ctl){ opt.signal=ctl.signal; timer=setTimeout(()=>{try{ctl.abort();}catch(e){}},ms); }
@@ -1566,7 +1570,7 @@ function usagePercentValue(value){
 async function refresh(){
   try{
   const d=await api('/api/state');
-  if(!d||!d.accounts) throw new Error((d&&d.error)||'返回数据异常');  // 不要抛 undefined.length
+  if(!d||!d.accounts) throw new Error((d&&d.error)||'返回数据异常');
   const h=(d.gw&&d.gw.healthz)||{};
   const st=(d.gw&&d.gw.status)||{};
   const up=!st._error;
@@ -1681,7 +1685,6 @@ async function loadCredit(silent){
   try{
     const r=await api('/api/credit',null,90000);
     if(!r.ok){
-      // 静默刷新失败时保留旧数据，不把已经显示好的内容清掉
       if(!silent) box.innerHTML='<div class="msg err" style="display:block">查询失败：'+esc(r.error||'未知错误')+'</div>';
       return;
     }

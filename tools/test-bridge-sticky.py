@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""离线测试桥接层对网关会话粘性字段的透传。"""
+"""Offline unit tests for gateway session stickiness forwarding in responses-bridge."""
 import importlib.util
 import os
 
@@ -30,11 +30,11 @@ def main():
                    "content": [{"type": "input_text", "text": "hi"}]}],
     })
     failures += not check(body.get("prompt_cache_key") == "cache-session-1",
-                          "透传并裁剪 prompt_cache_key")
+                          "Forward and trim prompt_cache_key")
     failures += not check(body.get("metadata") == {"conversation_id": "conversation-1"},
-                          "显式会话 ID 优先于 prompt_cache_key")
+                          "Explicit conversation ID takes precedence over prompt_cache_key")
     failures += not check("secret" not in body.get("metadata", {}),
-                          "任意 metadata 不泄漏到上游")
+                          "Arbitrary metadata does not leak upstream")
 
     body2, _kinds, _dropped, _nsmap = bridge.to_chat_body({
         "model": "test-model",
@@ -44,7 +44,7 @@ def main():
     })
     failures += not check(body2.get("metadata") == {
         "conversationId": "top-level-conversation"
-    }, "兼容顶层 conversationId")
+    }, "Support top-level conversationId")
 
     body3, _kinds, _dropped, _nsmap = bridge.to_chat_body({
         "model": "test-model",
@@ -54,7 +54,7 @@ def main():
     })
     failures += not check(body3.get("metadata") == {
         "conversation_id": "cache-only-session"
-    }, "仅有 prompt_cache_key 时映射到 conversation_id")
+    }, "Map prompt_cache_key to conversation_id when missing")
 
     body4, _kinds, _dropped, _nsmap = bridge.to_chat_body({
         "model": "test-model",
@@ -65,9 +65,9 @@ def main():
     })
     failures += not check(body4.get("metadata") == {
         "conversation_id": "explicit-session-2"
-    }, "顶层 conversation_id 优先于 prompt_cache_key")
+    }, "Top-level conversation_id takes precedence over prompt_cache_key")
 
-    print("\n%s" % ("全部通过" if failures == 0 else "%d 项失败" % failures))
+    print("\n%s" % ("All tests passed" if failures == 0 else "%d failures" % failures))
     return 0 if failures == 0 else 1
 
 
