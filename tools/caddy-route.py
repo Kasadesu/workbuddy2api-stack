@@ -34,25 +34,30 @@ def extract_keys(text: str):
     site = text[i:j]
     m = re.search(r'not header_regexp authcheck Authorization "\^Bearer (.+?)\$"', site)
     if not m:
-        sys.exit("Could not find key validation regex in target site block")
+        sys.exit(f"{SITE} 块中找不到 key 校验正则，拒绝继续（避免两套口径不一致）")
     keys_re = m.group(1)
 
-    m2 = re.search(r'header_up Authorization "Bearer (.+?)"', site)
+    m2 = re.search(r'(?s)reverse_proxy\s+127\.0\.0\.1:7863\s*\{.*?header_up\s+Authorization\s+"Bearer\s+([^"\s]+)"', site)
     if not m2:
-        sys.exit("Could not find header_up Authorization builtin key in target site block")
+        m2 = re.search(r'header_up Authorization "Bearer ([^"\s]+)"', site)
+    if not m2:
+        sys.exit(f"{SITE} 块中找不到 header_up Authorization 内置 key，拒绝继续")
     builtin = m2.group(1)
     return keys_re, builtin
 
 
-def build_block(keys_re: str, builtin: str, target: int) -> str:
+def build_block(builtin_or_keys_re: str, builtin_or_target=None, target: int = 7866) -> str:
+    if builtin_or_target is None or isinstance(builtin_or_target, int):
+        builtin = builtin_or_keys_re
+        t = builtin_or_target if isinstance(builtin_or_target, int) else target
+    else:
+        builtin = builtin_or_target
+        t = target
     return "\n".join([
         BEGIN,
         "\thandle /v1/responses* {",
-        "\t\t@badb {",
-        '\t\t\tnot header_regexp authcheck Authorization "^Bearer ' + keys_re + '$"',
-        "\t\t}",
-        '\t\trespond @badb "invalid API key" 401',
-        "\t\treverse_proxy 127.0.0.1:%d {" % target,
+        "\t\treverse_proxy 127.0.0.1:%d {" % t,
+        '\t\t\theader_up X-Client-Key {http.request.header.Authorization}',
         '\t\t\theader_up Authorization "Bearer ' + builtin + '"',
         "\t\t\tflush_interval -1",
         "\t\t}",

@@ -8,6 +8,8 @@ Wants=network-online.target
 Type=simple
 User=workbuddy
 WorkingDirectory=/opt/responses-bridge
+Environment=PYTHONOPTIMIZE=1
+Environment=MALLOC_TRIM_THRESHOLD_=65536
 # Optional search API keys file (KEY=value per line)
 EnvironmentFile=-/opt/responses-bridge/search.env
 ExecStart=/usr/bin/python3 /opt/responses-bridge/responses-bridge.py --host 127.0.0.1 --port 7866 --upstream http://127.0.0.1:7863/v1/chat/completions --logdir /var/log/responses-bridge

@@ -11,6 +11,7 @@ import contextlib
 import datetime as dt
 import json
 import os
+import random
 import re
 import shutil
 import stat
@@ -56,6 +57,7 @@ DEFAULT_CONFIG = {
     "task_uids": [],
     "task_codes": [],
     "task_gap_seconds": 1.2,
+    "task_jitter_minutes": 10,
     "task_timeout_seconds": 900,
 }
 
@@ -130,6 +132,16 @@ def normalize_config(raw):
     if not 1.0 <= gap <= 60.0:
         raise ValueError("task_gap_seconds must be between 1 and 60")
     cfg["task_gap_seconds"] = gap
+
+    try:
+        jitter = int(cfg.get("task_jitter_minutes", 10))
+    except (TypeError, ValueError):
+        raise ValueError("task_jitter_minutes must be an integer")
+    if jitter < 0:
+        jitter = 0
+    elif jitter > 60:
+        jitter = 60
+    cfg["task_jitter_minutes"] = jitter
 
     try:
         timeout = int(cfg.get("task_timeout_seconds", 900))
@@ -214,6 +226,7 @@ class AutomationManager:
         self.runner = runner or self._docker_exec
         self.host_runner = host_runner or self._host_run
         self._thread_lock = threading.RLock()
+        self._slot_jitters = {}
 
     def load_config(self):
         raw = _read_json(self.config_path, DEFAULT_CONFIG)
@@ -431,9 +444,14 @@ class AutomationManager:
         if not codes:
             return False, "至少选择一个任务码"
         cfg = self.load_config()
+        if len(targets) > 1 and "ALL" not in targets:
+            targets = list(targets)
+            random.shuffle(targets)
+        base_gap = float(cfg.get("task_gap_seconds", 1.2))
+        jittered_gap = round(base_gap * random.uniform(0.7, 1.3), 2)
         args = [
             "python3", "/app/scripts/task_runner.py", *targets,
-            "--yes", "--gap", str(cfg["task_gap_seconds"]),
+            "--yes", "--gap", str(jittered_gap),
         ]
         for code in codes:
             args.extend(["--only", code])
@@ -489,11 +507,28 @@ class AutomationManager:
             if (
                 cfg["enabled"]
                 and cfg["task_scheduler_enabled"]
-                and now.minute < 5
                 and now.hour in cfg["task_hours"]
                 and cfg["task_codes"]
                 and self.load_state().get("last_scheduled_slot") != slot
             ):
+                jitter_min = int(cfg.get("task_jitter_minutes", 10))
+                slot_start = dt.datetime(now.year, now.month, now.day, now.hour, 0, 0)
+                slot_start_ts = slot_start.timestamp()
+                now_ts = now.timestamp()
+
+                if jitter_min > 0:
+                    if slot not in self._slot_jitters:
+                        max_jitter = max(30, jitter_min * 60)
+                        jitter_sec = random.randint(30, max_jitter)
+                        self._slot_jitters[slot] = slot_start_ts + jitter_sec
+                    target_ts = self._slot_jitters[slot]
+
+                    if now_ts < target_ts:
+                        wait_left = int(target_ts - now_ts)
+                        self._save_state(message="等待槽位抖动中，预计 %ds 后触发 (slot=%s)" % (wait_left, slot))
+                        stop_event.wait(interval)
+                        continue
+
                 uids = cfg["task_uids"] or ["ALL"]
                 try:
                     self._save_state(last_scheduled_slot=slot)
@@ -502,6 +537,10 @@ class AutomationManager:
                         self._save_state(message=msg)
                 except Exception as exc:
                     self._save_state(message=str(exc)[:300])
+                finally:
+                    if len(self._slot_jitters) > 10:
+                        for old_k in list(self._slot_jitters)[:-5]:
+                            self._slot_jitters.pop(old_k, None)
             stop_event.wait(interval)
 
 

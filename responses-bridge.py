@@ -29,10 +29,11 @@ import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.7.0"
+VERSION = "1.8.0"
 
 DEFAULT_UPSTREAM = "http://127.0.0.1:7863/v1/chat/completions"
 DEFAULT_PORT = 7866
@@ -42,6 +43,77 @@ BODY_KEEP = 60               # max dumped body files to retain
 TOKEN_STATS_FILENAME = "token-usage.json"
 TOKEN_STATS_DAY_LIMIT = 400
 TOKEN_STATS_LOCK = threading.RLock()
+
+DEFAULT_KEYS_FILE = "/opt/workbuddy2api/admin/keys.json"
+_KEYS_CACHE_LOCK = threading.RLock()
+_KEYS_CACHE = {
+    "path": "",
+    "mtime_ns": -1,
+    "size": -1,
+    "keys": frozenset(),
+    "err": None,
+}
+
+
+def load_valid_keys(keys_path: str = DEFAULT_KEYS_FILE) -> frozenset:
+    """从 keys.json 加载启用的 API keys。
+
+    使用文件 stat (mtime_ns, size) 缓存，避免高并发下频繁读取磁盘；
+    检测到文件修改时自动热重载。
+    遵循 Fail-Closed 原则：文件缺失、权限不足或 JSON 损坏时返回空集，绝不抛出 500。
+    """
+    if not keys_path:
+        return frozenset()
+
+    try:
+        st = os.stat(keys_path)
+    except OSError:
+        with _KEYS_CACHE_LOCK:
+            _KEYS_CACHE.update({
+                "path": keys_path,
+                "mtime_ns": -1,
+                "size": -1,
+                "keys": frozenset(),
+                "err": "file_not_found",
+            })
+        return frozenset()
+
+    mtime_ns = getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))
+    size = st.st_size
+
+    with _KEYS_CACHE_LOCK:
+        if (_KEYS_CACHE["path"] == keys_path and
+                _KEYS_CACHE["mtime_ns"] == mtime_ns and
+                _KEYS_CACHE["size"] == size):
+            return _KEYS_CACHE["keys"]
+
+    valid_keys = set()
+    err = None
+    try:
+        with open(keys_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            raw_keys = data.get("keys", [])
+            if isinstance(raw_keys, list):
+                for k in raw_keys:
+                    if isinstance(k, dict) and k.get("enabled", True):
+                        key_val = k.get("key")
+                        if isinstance(key_val, str) and key_val.strip():
+                            valid_keys.add(key_val.strip())
+    except Exception as e:
+        err = repr(e)
+        valid_keys = set()
+
+    res = frozenset(valid_keys)
+    with _KEYS_CACHE_LOCK:
+        _KEYS_CACHE.update({
+            "path": keys_path,
+            "mtime_ns": mtime_ns,
+            "size": size,
+            "keys": res,
+            "err": err,
+        })
+    return res
 
 NS_SEP = "__"                # separator for flattened namespace tools
 WEB_SEARCH_TOOL = "web_search"
@@ -1615,12 +1687,53 @@ def fetch_url_from_args(raw: str) -> str:
 
 # ------------------------------------------------------------------ HTTP Server
 
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self, server_address, RequestHandlerClass, max_workers=32):
+        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="responses-bridge")
+        super().__init__(server_address, RequestHandlerClass)
+
+    def process_request(self, request, client_address):
+        try:
+            self._executor.submit(self.process_request_thread, request, client_address)
+        except Exception:
+            self.handle_error(request, client_address)
+            self.shutdown_request(request)
+
+    def server_close(self):
+        super().server_close()
+        self._executor.shutdown(wait=False)
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "responses-bridge/" + VERSION
     upstream = DEFAULT_UPSTREAM
     logdir = os.environ.get("BRIDGE_LOG_DIR", "/var/log/responses-bridge")
     verbose = False
+    key_check_enabled: bool = (os.environ.get("BRIDGE_KEY_CHECK", "1").lower() not in ("0", "false", "off", "no"))
+    keys_file: str = os.environ.get("BRIDGE_KEYS_FILE", DEFAULT_KEYS_FILE)
+
+    def _extract_client_key(self) -> str:
+        """从请求头提取 API Key。
+        优先读取反代传递的 X-Client-Key，缺失时回退读取 Authorization。
+        剥离 Bearer 前缀并去除首尾空白。
+        """
+        raw = (self.headers.get("X-Client-Key") or self.headers.get("Authorization") or "").strip()
+        if raw.lower().startswith("bearer "):
+            return raw[7:].strip()
+        return raw
+
+    def _is_key_valid(self, client_key: str) -> bool:
+        """检查 client_key 是否合法。"""
+        if not self.key_check_enabled:
+            return True
+        if not client_key:
+            return False
+        valid = load_valid_keys(self.keys_file)
+        return client_key in valid
 
     def _json(self, code, obj, headers=None):
         body = json.dumps(obj, ensure_ascii=False).encode()
@@ -1749,6 +1862,17 @@ class Handler(BaseHTTPRequestHandler):
         if not self.path.startswith("/v1/responses"):
             return self._json(404, {"error": {"message": "unknown path " + self.path}})
 
+        client_key = self._extract_client_key()
+        if not self._is_key_valid(client_key):
+            masked = (client_key[:8] + "...") if len(client_key) > 8 else (client_key or "<empty>")
+            self._log({"ts": time.strftime("%F %T"), "err": "unauthorized", "key": masked})
+            return self._json(401, {
+                "error": {
+                    "message": "invalid API key",
+                    "type": "invalid_request_error"
+                }
+            })
+
         if req.get("previous_response_id"):
             # stateless passthrough, log only
             pass
@@ -1770,13 +1894,18 @@ class Handler(BaseHTTPRequestHandler):
                   flush=True)
 
         def open_upstream():
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": auth or "",
+                "Accept": "text/event-stream",
+                "Accept-Encoding": "identity",
+            }
+            if client_key:
+                headers["X-Client-Key"] = client_key
             u = urllib.request.Request(
                 self.upstream, data=json.dumps(body, ensure_ascii=False).encode(),
                 method="POST",
-                headers={"Content-Type": "application/json",
-                         "Authorization": auth or "",
-                         "Accept": "text/event-stream",
-                         "Accept-Encoding": "identity"})
+                headers=headers)
             ctx = ssl.create_default_context()
             return urllib.request.urlopen(u, timeout=900, context=ctx)
 
@@ -1991,20 +2120,29 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    default_check = os.environ.get("BRIDGE_KEY_CHECK", "1").lower() not in ("0", "false", "off", "no")
+    default_keys_file = os.environ.get("BRIDGE_KEYS_FILE", DEFAULT_KEYS_FILE)
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--upstream", default=DEFAULT_UPSTREAM)
     ap.add_argument("--logdir", default=os.environ.get("BRIDGE_LOG_DIR", "/var/log/responses-bridge"))
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--keys-file", default=default_keys_file, help="密钥文件路径 (keys.json)")
+    ap.add_argument("--key-check", dest="key_check", action="store_true", default=default_check, help="启用 API key 鉴权")
+    ap.add_argument("--no-key-check", dest="key_check", action="store_false", help="停用 API key 鉴权")
     a = ap.parse_args()
 
     Handler.upstream = a.upstream
     Handler.logdir = a.logdir
     Handler.verbose = a.verbose
-    srv = ThreadingHTTPServer((a.host, a.port), Handler)
-    print("responses-bridge %s on %s:%d -> %s  (log: %s)"
-          % (VERSION, a.host, a.port, a.upstream, a.logdir), flush=True)
+    Handler.keys_file = a.keys_file
+    Handler.key_check_enabled = a.key_check
+    srv = BoundedThreadingHTTPServer((a.host, a.port), Handler)
+    print("responses-bridge %s on %s:%d -> %s  (log: %s, auth: %s, keys: %s)"
+          % (VERSION, a.host, a.port, a.upstream, a.logdir,
+             "enabled" if a.key_check else "disabled", a.keys_file), flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

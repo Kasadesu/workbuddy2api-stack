@@ -19,11 +19,8 @@ api.example.com {
 	# to the local bridge and keeps the upstream key off the public interface.
 	# >>> responses-bridge (managed) >>>
 	handle /v1/responses* {
-		@bridge_bad {
-			not header_regexp authcheck Authorization "^Bearer (__PUBLIC_KEY_1__|__PUBLIC_KEY_2__)$"
-		}
-		respond @bridge_bad "invalid API key" 401
 		reverse_proxy 127.0.0.1:7866 {
+			header_up X-Client-Key {http.request.header.Authorization}
 			header_up Authorization "Bearer __GATEWAY_INTERNAL_KEY__"
 			flush_interval -1
 		}

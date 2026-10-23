@@ -55,10 +55,11 @@ def main():
     upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
     upstream_thread.start()
     bridge = ThreadingHTTPServer(("127.0.0.1", 0), m.Handler)
-    old_upstream, old_logdir, old_fetch = m.Handler.upstream, m.Handler.logdir, m.do_web_fetch
+    old_upstream, old_logdir, old_fetch, old_key_check = m.Handler.upstream, m.Handler.logdir, m.do_web_fetch, m.Handler.key_check_enabled
     with tempfile.TemporaryDirectory() as logdir:
         m.Handler.upstream = "http://127.0.0.1:%d/v1/chat/completions" % upstream.server_port
         m.Handler.logdir = logdir
+        m.Handler.key_check_enabled = False
         m.do_web_fetch = lambda url: "Fetched: %s\n\nSynthetic page body" % url
         bridge_thread = threading.Thread(target=bridge.serve_forever, daemon=True)
         bridge_thread.start()
@@ -86,7 +87,7 @@ def main():
         finally:
             bridge.shutdown()
             bridge.server_close()
-            m.Handler.upstream, m.Handler.logdir, m.do_web_fetch = old_upstream, old_logdir, old_fetch
+            m.Handler.upstream, m.Handler.logdir, m.do_web_fetch, m.Handler.key_check_enabled = old_upstream, old_logdir, old_fetch, old_key_check
     upstream.shutdown()
     upstream.server_close()
 
