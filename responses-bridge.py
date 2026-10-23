@@ -56,12 +56,6 @@ _KEYS_CACHE = {
 
 
 def load_valid_keys(keys_path: str = DEFAULT_KEYS_FILE) -> frozenset:
-    """从 keys.json 加载启用的 API keys。
-
-    使用文件 stat (mtime_ns, size) 缓存，避免高并发下频繁读取磁盘；
-    检测到文件修改时自动热重载。
-    遵循 Fail-Closed 原则：文件缺失、权限不足或 JSON 损坏时返回空集，绝不抛出 500。
-    """
     if not keys_path:
         return frozenset()
 
@@ -1717,17 +1711,12 @@ class Handler(BaseHTTPRequestHandler):
     keys_file: str = os.environ.get("BRIDGE_KEYS_FILE", DEFAULT_KEYS_FILE)
 
     def _extract_client_key(self) -> str:
-        """从请求头提取 API Key。
-        优先读取反代传递的 X-Client-Key，缺失时回退读取 Authorization。
-        剥离 Bearer 前缀并去除首尾空白。
-        """
         raw = (self.headers.get("X-Client-Key") or self.headers.get("Authorization") or "").strip()
         if raw.lower().startswith("bearer "):
             return raw[7:].strip()
         return raw
 
     def _is_key_valid(self, client_key: str) -> bool:
-        """检查 client_key 是否合法。"""
         if not self.key_check_enabled:
             return True
         if not client_key:
