@@ -1,4 +1,4 @@
-# Kasa2API Stack
+# Workbuddy2API Stack
 
 Integration stack and bridge services for the Kasa2API gateway.
 
