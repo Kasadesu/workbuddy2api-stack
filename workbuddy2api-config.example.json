@@ -14,8 +14,8 @@
   "global": { "enabled": true, "chat_base": "", "billing_base": "" },
   "upstream": {
     "timeout_seconds": 120, "header_timeout_seconds": 120,
-    "idle_timeout_seconds": 300, "user_agent": "", "client_version": "",
-    "cli_version": "", "device_token": "", "device_token_file": "",
+    "idle_timeout_seconds": 300, "user_agent": "", "client_version": "2.63.2",
+    "cli_version": "2.63.2", "device_token": "", "device_token_file": "./data/device_token",
     "client_name": "WorkBuddy", "passthrough_ip": false
   },
   "features": { "sanitize_blacklist_fingerprints": true },

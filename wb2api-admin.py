@@ -54,7 +54,7 @@ ADMIN_PASSWORD_MIN = 8
 USAGE_HISTORY_LIMIT = 240
 
 # version tag for frontend auto-reload
-PAGE_VERSION = "v1.1.0"
+PAGE_VERSION = "v1.2.0"
 RECENT_USAGE_LIMIT = 20
 
 # cache upstream model catalog
@@ -93,6 +93,88 @@ def docker_host(args, timeout=60):
         return p.returncode, p.stdout.decode("utf-8", "ignore"), p.stderr.decode("utf-8", "ignore")
     except subprocess.TimeoutExpired:
         return 124, "", "docker command timed out after %ds" % timeout
+
+
+def get_device_token_status():
+    """Read device token setting from config or data file (masked for display)."""
+    token = ""
+    source = ""
+    # 1. Check data file first (./data/device_token on host)
+    try:
+        dt_file = os.path.join(BASE, "data", "device_token")
+        if os.path.exists(dt_file):
+            with open(dt_file, "r", encoding="utf-8") as f:
+                tok = f.read().strip()
+                if tok:
+                    token = tok
+                    source = "data/device_token"
+    except Exception:
+        pass
+    # 2. Check CFG upstream.device_token
+    if not token:
+        try:
+            if os.path.exists(CFG):
+                with open(CFG, "r", encoding="utf-8") as f:
+                    cfg_data = json.load(f)
+                    tok = str((cfg_data.get("upstream") or {}).get("device_token") or "").strip()
+                    if tok:
+                        token = tok
+                        source = "config.json"
+        except Exception:
+            pass
+    # 3. Check environment
+    if not token:
+        env_tok = os.environ.get("WB2A_DEVICE_TOKEN", "").strip()
+        if env_tok:
+            token = env_tok
+            source = "env:WB2A_DEVICE_TOKEN"
+    if not token:
+        return {"ok": True, "configured": False, "masked": "", "source": "", "len": 0}
+    masked = token[:3] + "*" * max(4, len(token) - 6) + token[-3:] if len(token) >= 8 else "***"
+    return {"ok": True, "configured": True, "masked": masked, "source": source, "len": len(token)}
+
+
+def set_device_token(new_token):
+    """Save device token to ./data/device_token and ensure gateway reads it."""
+    token = str(new_token or "").strip()
+    if token and not re.match(r"^[A-Za-z0-9_\-\.]{10,128}$", token):
+        return False, "设备码格式不合法（应为 10-128 位的字母、数字或横线下划线）"
+    data_dir = os.path.join(BASE, "data")
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+    except Exception as e:
+        return False, "创建 data 目录失败: " + str(e)
+    dt_path = os.path.join(data_dir, "device_token")
+    try:
+        with open(dt_path, "w", encoding="utf-8") as f:
+            f.write(token)
+        try:
+            os.chmod(dt_path, 0o644)
+        except Exception:
+            pass
+    except Exception as e:
+        return False, "写入设备码文件失败: " + str(e)
+
+    # Ensure config.json has device_token_file set
+    try:
+        if os.path.exists(CFG):
+            with open(CFG, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            up = cfg.get("upstream")
+            if isinstance(up, dict) and not up.get("device_token_file"):
+                up["device_token_file"] = "/app/data/device_token"
+                cfg["upstream"] = up
+                with open(CFG, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+    try:
+        docker_host(["restart", CONTAINER], timeout=120)
+    except Exception:
+        pass
+    msg = "设备码已更新，网关已重启生效。" if token else "设备码已清除，网关已重启生效。"
+    return True, msg
 
 
 def _empty_token_stats(source="responses-bridge"):
@@ -1374,6 +1456,16 @@ label.sw{color:var(--mut);font-weight:400;font-size:12px;display:inline-flex;gap
   <p class="sub" style="margin:12px 0 0">同一把 Kasa2API Key 可用于 WorkBuddy / CodeBuddy；Responses API 接口也沿用这把 Key。新建 Key 使用 <code>sk-</code> 前缀；已有 <code>wb-</code> Key 继续兼容。</p>
 </div>
 
+<div class="card"><h2>渠道风控与设备码（Device Token）</h2>
+  <p class="sub">用于规避上游 <code>11128 这次调用没通过渠道校验</code> 拦截。请填入个人客户端生成的 <code>X-Device-Token</code>。</p>
+  <div class="row" style="margin-top:12px">
+    <input id="deviceTokenInput" type="password" placeholder="留空清除，或输入设备码（如 32-36 位十六进制指纹）" style="flex:1;min-width:240px" autocomplete="off">
+    <button id="btnSaveDeviceToken">保存并重启网关</button>
+  </div>
+  <div id="deviceTokenStatus" class="notice" style="margin-top:10px">正在读取设备码状态…</div>
+  <p class="sub" style="margin:10px 0 0">提示：设备码落盘于 <code>./data/device_token</code>，供所有账号共享。保存后会自动重启网关使配置生效。</p>
+</div>
+
 <div class="card"><h2>网关状态（原始）</h2><pre id="raw"></pre></div>
 </section>
 
@@ -1602,7 +1694,7 @@ function activateModule(name){
   if(name==='overview'){ loadModels(true); }
   if(name==='platforms') loadPlatforms(true);
   if(name==='usage') loadUsage(true);
-  if(name==='gateway') loadKeys(true);
+  if(name==='gateway'){ loadKeys(true); loadDeviceToken(true); }
   if(name==='automation') loadAutomation(true);
   if(name==='security') loadAdminAuth();
 }
@@ -2036,6 +2128,52 @@ async function loadKeys(silent){
   }catch(e){ if(!silent) box.innerHTML='<div class="msg err" style="display:block">请求失败：'+esc(e.message)+'</div>'; }
 }
 $('#keyPlatform').onchange=()=>{ selectedKeyPlatform=$('#keyPlatform').value||'workbuddy'; renderKeyPlatform(); renderKeyTable(); };
+async function loadDeviceToken(silent){
+  const el=$('#deviceTokenStatus');
+  if(!el) return;
+  try{
+    const r=await api('/api/device-token');
+    if(!r.ok){
+      el.textContent=r.error||'读取设备码失败';
+      return;
+    }
+    if(r.configured){
+      el.innerHTML='已配置设备码：<code>'+esc(r.masked)+'</code>（长度 '+esc(r.len)+' 字符，来源：'+esc(r.source)+'）';
+    }else{
+      el.textContent='当前未配置设备码（如遇 11128 渠道拦截错误，请在此填入专属设备码）。';
+    }
+  }catch(e){
+    if(!silent) el.textContent='读取设备码失败：'+e.message;
+  }
+}
+const btnSaveDeviceToken=$('#btnSaveDeviceToken');
+if(btnSaveDeviceToken){
+  btnSaveDeviceToken.onclick=async()=>{
+    const input=$('#deviceTokenInput');
+    const token=(input.value||'').trim();
+    if(token && (token.length < 10 || token.length > 128)){
+      alert('设备码长度应在 10 到 128 字符之间。');
+      return;
+    }
+    const msg = token ? '确认保存新设备码并重启网关吗？' : '确认清除设备码并重启网关吗？';
+    if(!confirm(msg)) return;
+    btnSaveDeviceToken.disabled=true;
+    try{
+      const r=await api('/api/device-token', {method:'POST', body:JSON.stringify({device_token:token})});
+      if(!r.ok){
+        alert('保存失败：'+(r.error||'未知错误'));
+      }else{
+        input.value='';
+        alert(r.info||'设备码已保存，网关已重启生效。');
+        await loadDeviceToken();
+      }
+    }catch(e){
+      alert('请求失败：'+e.message);
+    }finally{
+      btnSaveDeviceToken.disabled=false;
+    }
+  };
+}
 function toggleReveal(id){ keyReveal[id]=!keyReveal[id]; loadKeys(); }
 // Delegated click handling
 document.addEventListener('click',(e)=>{
@@ -2259,7 +2397,7 @@ async function tick(){
   if(currentModule==='platforms') loadPlatforms(true);
   if(currentModule==='accounts'&&Date.now()-lastCredit>120000){ lastCredit=Date.now(); loadCredit(true); }
   if(currentModule==='usage'&&Date.now()-lastUsage>120000){ lastUsage=Date.now(); loadUsage(true); }
-  if(currentModule==='gateway') loadKeys(true);
+  if(currentModule==='gateway'){ loadKeys(true); loadDeviceToken(true); }
   if(currentModule==='automation') loadAutomation(true);
   if(currentModule==='security') loadAdminAuth();
 }
@@ -2385,6 +2523,11 @@ class H(BaseHTTPRequestHandler):
         elif path == "/api/automation/status":
             try:
                 self._send(200, json.dumps(AUTOMATION.status(), ensure_ascii=False))
+            except Exception as e:
+                self._send(200, json.dumps({"ok": False, "error": str(e)[:300]}, ensure_ascii=False))
+        elif path == "/api/device-token":
+            try:
+                self._send(200, json.dumps(get_device_token_status(), ensure_ascii=False))
             except Exception as e:
                 self._send(200, json.dumps({"ok": False, "error": str(e)[:300]}, ensure_ascii=False))
         elif path == "/api/admin-auth":
@@ -2517,6 +2660,11 @@ class H(BaseHTTPRequestHandler):
                 docker_host(["restart", CONTAINER], timeout=120)
                 invalidate_model_cache()
                 self._send(200, json.dumps({"ok": True}))
+            elif path == "/api/device-token":
+                token = body.get("device_token", "")
+                ok, msg = set_device_token(token)
+                self._send(200, json.dumps({"ok": ok, "info": msg if ok else "",
+                                            "error": None if ok else msg}, ensure_ascii=False))
             elif path == "/api/admin-auth":
                 username = (body.get("username") or "").strip()
                 password = body.get("password") or ""

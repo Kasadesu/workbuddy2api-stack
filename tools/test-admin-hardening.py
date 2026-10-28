@@ -411,6 +411,38 @@ def test_recent_usage_info(m):
           "最近使用记录不向管理页透传请求正文", str(rows))
 
 
+def test_device_token_status_and_update(m):
+    docker_calls = []
+    m.docker_host = lambda args, timeout=60: docker_calls.append(args) or (0, "", "")
+
+    # 1. 初始未配置状态
+    status = m.get_device_token_status()
+    check(status.get("ok") and not status.get("configured"), "默认状态未配置设备码", str(status))
+
+    # 2. 拒绝不合规格式
+    ok, err = m.set_device_token("short")
+    check(not ok and "格式不合法" in err, "拒绝过短设备码", err)
+    ok, err = m.set_device_token("has space 1234567890")
+    check(not ok and "格式不合法" in err, "拒绝含空格设备码", err)
+
+    # 3. 保存合规设备码
+    valid_token = "0123456789abcdef0123456789abcdef"
+    ok, msg = m.set_device_token(valid_token)
+    check(ok and "已更新" in msg, "合法设备码更新成功", msg)
+    check(bool(docker_calls and docker_calls[-1] == ["restart", m.CONTAINER]), "更新设备码触发容器重启", str(docker_calls))
+
+    # 4. 读取打码脱敏验证
+    status = m.get_device_token_status()
+    check(status.get("configured") is True and status.get("len") == 32, "设备码状态已配置", str(status))
+    check(status.get("masked").startswith("012") and status.get("masked").endswith("def"), "设备码正确打码脱敏", str(status))
+
+    # 5. 清除设备码
+    ok, msg = m.set_device_token("")
+    check(ok and "已清除" in msg, "清除设备码成功", msg)
+    status = m.get_device_token_status()
+    check(status.get("ok") and not status.get("configured"), "设备码已被清除", str(status))
+
+
 def main():
     print("admin hardening tests")
     with tempfile.TemporaryDirectory() as tmp:
@@ -436,6 +468,7 @@ def main():
         test_platform_directory(m)
         test_shared_key_platform_switch(m)
         test_recent_usage_info(m)
+        test_device_token_status_and_update(m)
     if FAILS:
         print("\n%d failures: %s" % (len(FAILS), FAILS))
         return 1
